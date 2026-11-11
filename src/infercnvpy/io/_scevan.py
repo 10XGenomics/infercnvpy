@@ -117,9 +117,17 @@ def read_scevan(
     if subset:
         adata._inplace_subset_obs(scevan_res.index.values)
 
-    adata.obsm[f"X_{key_added}"] = scevan_res.reindex(adata.obs_names).values
+    cnv_matrix = scevan_res.reindex(adata.obs_names)
     if scevan_subclone_res is not None:
-        adata.obsm[f"X_{key_added}"].loc[scevan_subclone_res.index, :] = scevan_subclone_res
+        # overwrite the per-cell CNV profile with the subclone segmentation (positional columns)
+        if scevan_subclone_res.shape[1] != cnv_matrix.shape[1]:
+            raise ValueError(
+                f"Subclone matrix has {scevan_subclone_res.shape[1]} genes, "
+                f"but the CNA matrix has {cnv_matrix.shape[1]}."
+            )
+        shared = scevan_subclone_res.index.intersection(cnv_matrix.index)
+        cnv_matrix.loc[shared, :] = scevan_subclone_res.loc[shared].values
+    adata.obsm[f"X_{key_added}"] = cnv_matrix.values
     adata.uns[key_added] = {"chr_pos": _get_chr_pos_from_array(scevan_anno["seqnames"])}
 
     if not inplace:

@@ -31,7 +31,6 @@ dependencies = [
   "pandas>=1",
   "pybiomart>=0.2",
   "pycairo>=1.20; sys_platform=='win32'",
-  "pytest-benchmark",
   "pytoml",
   "rdata",                                # MIT; reads SCEVAN .RData files
   "scanpy>=1.10",
@@ -40,8 +39,8 @@ dependencies = [
   "tqdm>=4.63",                           # fixes tqdm.auto
 ]
 optional-dependencies.copykat = [ "rpy2" ]
+optional-dependencies.dask = [ "dask[array]" ]
 optional-dependencies.gtf = [ "gtfparse>=2.1" ]
-optional-dependencies.scevan = [ "pyreadr" ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://infercnvpy.readthedocs.io/"
 urls.Homepage = "https://github.com/icbi-lab/infercnvpy"
@@ -57,8 +56,10 @@ dev = [
 ]
 test = [
   "coverage>=7.10",
+  "dask[array]",
   "openpyxl",       # required for one of the scanpy datasets used in the tests
   "pytest",
+  "pytest-benchmark",
   "pytest-cov",     # For VS Code’s coverage functionality
 ]
 doc = [
