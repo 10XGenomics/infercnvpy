@@ -3,8 +3,10 @@ import warnings
 import leidenalg
 import numpy as np
 import numpy.testing as npt
+import pandas as pd
 import pytest
 import scanpy as sc
+import scipy.sparse as sp
 
 import infercnvpy as cnv
 from infercnvpy.tl._infercnv import _get_reference
@@ -108,11 +110,75 @@ def test_infercnv_records_params(adata_full_mock, tmp_path):
     assert sc.read_h5ad(tmp_path / "cnv.h5ad").uns["cnv"]["params"]["dynamic_threshold"] is None
 
 
+def test_infercnv_params_of_list_likes_are_writable(adata_full_mock, tmp_path):
+    cats = adata_full_mock.obs["sample"].astype("category").cat.categories[:1]
+    cnv.tl.infercnv(
+        adata_full_mock, reference_key="sample", reference_cat=cats, exclude_chromosomes={"chrY", "chrX"}, window_size=3
+    )
+    params = adata_full_mock.uns["cnv"]["params"]
+    assert params["reference_cat"] == ["sample1"]
+    assert params["exclude_chromosomes"] == ["chrX", "chrY"]
+    adata_full_mock.write_h5ad(tmp_path / "cnv.h5ad")
+    adata_full_mock.write_zarr(tmp_path / "cnv.zarr")
+    assert list(sc.read_h5ad(tmp_path / "cnv.h5ad").uns["cnv"]["params"]["exclude_chromosomes"]) == ["chrX", "chrY"]
+
+
 def test_infercnv_no_chr_prefix(adata_full_mock):
     """Chromosome names without a "chr" prefix (Ensembl style) give a clear error."""
     adata_full_mock.var["chromosome"] = adata_full_mock.var["chromosome"].str.removeprefix("chr")
     with pytest.raises(ValueError, match='start with "chr"'):
         cnv.tl.infercnv(adata_full_mock, window_size=3, step=1)
+
+
+def test_infercnv_no_chromosome_left(adata_full_mock):
+    """Genes only on chrM, or all genes on "chr" chromosomes below `min_mean`, give a clear error."""
+    adata = adata_full_mock.copy()
+    adata.var["chromosome"] = ["chrM"] * 5 + ["MT"] * 5
+    with pytest.raises(ValueError, match='start with "chr"'):
+        cnv.tl.infercnv(adata, window_size=3, step=1)
+    adata = adata_full_mock.copy()
+    adata.var["chromosome"] = ["chr1"] * 5 + ["MT"] * 5
+    adata.X = sp.csr_matrix(adata.X.toarray() * np.repeat([0, 1], 5))  # the chr1 genes are not expressed
+    with pytest.raises(ValueError, match="No genes left.*min_mean=0.5"):
+        cnv.tl.infercnv(adata, window_size=3, step=1, min_mean=0.5)
+
+
+@pytest.mark.parametrize("dtype", ["float64", "Int64"])
+def test_infercnv_missing_start_or_end(adata_full_mock, dtype):
+    """A gene without a start is left out like a gene without a chromosome; a gene without an end is kept."""
+    kw = {"reference": np.ones(10), "window_size": 3, "step": 1, "inplace": False}
+    missing = np.nan if dtype == "float64" else pd.NA
+    expected = cnv.tl.infercnv(adata_full_mock, **kw)
+
+    adata = adata_full_mock.copy()
+    adata.var["start"] = adata.var["start"].astype(dtype)
+    adata.var.loc["gene2", "start"] = missing
+    without_gene2 = adata_full_mock[:, adata_full_mock.var_names != "gene2"].copy()
+    _, res, _ = cnv.tl.infercnv(adata, **kw)
+    np.testing.assert_array_equal(
+        res.toarray(), cnv.tl.infercnv(without_gene2, **{**kw, "reference": np.ones(9)})[1].toarray()
+    )
+
+    adata = adata_full_mock.copy()
+    adata.var["end"] = adata.var["end"].astype(dtype)
+    adata.var.loc["gene3", "end"] = missing
+    cnv.tl.infercnv(adata, **{**kw, "inplace": True})
+    np.testing.assert_array_equal(adata.obsm["X_cnv"].toarray(), expected[1].toarray())
+    # gene3 ends at its start: the window of genes 1-3 ends at 300 instead of 399
+    np.testing.assert_array_equal(adata.uns["cnv"]["window_end"][:3], [300, 499, 599])
+
+
+@pytest.mark.parametrize("fmt", [np.asarray, sp.csr_matrix])
+def test_infercnv_nan_in_expression(adata_full_mock, fmt):
+    X = adata_full_mock.X.toarray().astype(np.float32)
+    X[1, 2] = np.nan
+    adata_full_mock.X = fmt(X)
+    with pytest.raises(ValueError, match="NaN"):
+        cnv.tl.infercnv(adata_full_mock, reference=np.ones(10), window_size=3, step=1)
+    X[1, 2] = 0
+    adata_full_mock.X = fmt(X)
+    with pytest.raises(ValueError, match="NaN"):
+        cnv.tl.infercnv(adata_full_mock, reference=np.r_[np.nan, np.ones(9)], window_size=3, step=1)
 
 
 def test_infercnv_manual_reference(adata_oligodendroma):

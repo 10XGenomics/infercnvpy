@@ -54,6 +54,12 @@ def _as_df(df) -> pd.DataFrame:
     raise TypeError(f"infercnvpy needs `obs` and `var` as pandas DataFrames, got {type(df).__name__}.")
 
 
+def _obs_column(adata, key: str) -> pd.Series:
+    """`adata.obs[key]` as a pandas Series (the `obs` of `anndata.experimental.read_lazy` is a lazy `Dataset2D`)."""
+    obs = adata.obs
+    return obs[key] if isinstance(obs, pd.DataFrame) else obs[[key]].to_memory()[key]
+
+
 def _choose_mtx_rep(adata, use_raw=False, layer=None):
     """Get gene expression from anndata depending on use_raw and layer."""
     is_layer = layer is not None
@@ -70,8 +76,14 @@ def _choose_mtx_rep(adata, use_raw=False, layer=None):
 
 
 def _params_for_uns(**params) -> dict:
-    """Prepare call parameters for `adata.uns[...]["params"]`: store sequences as lists."""
-    return {k: list(v) if isinstance(v, tuple | list) else v for k, v in params.items()}
+    """Prepare call parameters for `adata.uns[...]["params"]`: store list-likes (e.g. a pandas Index) as lists."""
+
+    def writable(v):
+        if isinstance(v, str | dict) or not pd.api.types.is_list_like(v):
+            return v
+        return sorted(v) if isinstance(v, set | frozenset) else list(v)
+
+    return {k: writable(v) for k, v in params.items()}
 
 
 def _deprecated_positional[F: Callable[..., Any]](*names: str, until: str = "0.8.0") -> Callable[[F], F]:

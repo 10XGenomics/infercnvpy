@@ -12,7 +12,7 @@ from scverse_misc.logging import config
 config.verbosity = "info"
 ```
 
-At `"info"`, each infercnvpy function logs one line with its result, e.g. how many windows {func}`infercnvpy.tl.infercnv` computed and how many genes it dropped, and {func}`~infercnvpy.tl.infercnv` shows a progress bar.
+At `"info"`, each infercnvpy function logs one line with its result, e.g. how many windows {func}`infercnvpy.tl.infercnv` computed and how many genes it dropped.
 A line about dropped input also names a fix, which shows when the level is more detailed than the line's own: at `"info"` for a warning, at `"debug"` for an info line.
 To set the level for infercnvpy alone, use `logging.getLogger("scverse.infercnvpy").setLevel("INFO")`.
 

@@ -21,7 +21,7 @@ from mpl_toolkits.axes_grid1.axes_size import Fixed
 
 from infercnvpy._logging import SKIP_OWN_FRAMES
 from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_df, _as_matrix, _is_backed, _is_dask
+from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column
 from infercnvpy.pl._heatmap_kernels import binned_sums, pixel_rows, sampled_rows
 
 if TYPE_CHECKING:
@@ -317,7 +317,7 @@ def _use_legacy(func: str, adata: AnnData, groupby: str, use_rep: str, mode: str
         reasons.append("dendrogram=<key>")
     if kwargs.get("standard_scale") not in (None, "var", "obs"):
         reasons.append(f"standard_scale={kwargs['standard_scale']!r}")
-    col = _as_df(adata.obs)[groupby]
+    col = _obs_column(adata, groupby)
     if pd.api.types.is_numeric_dtype(col) and not isinstance(col.dtype, pd.CategoricalDtype):
         reasons.append("a numeric `groupby` column")
     if reasons:
@@ -396,7 +396,7 @@ def _n_pixel_rows(fig: Figure, ax: Axes, *, swap: bool) -> int:
 
 
 def _categories(adata: AnnData, groupby: str) -> pd.Categorical:
-    col = _as_df(adata.obs)[groupby].astype("category")  # keeps the order of categories that are already categorical
+    col = _obs_column(adata, groupby).astype("category")  # keeps the order of categories that are already categorical
     return pd.Categorical(col, categories=col.cat.categories)
 
 

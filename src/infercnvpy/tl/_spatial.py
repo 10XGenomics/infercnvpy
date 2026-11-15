@@ -20,7 +20,7 @@ from anndata import AnnData
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import njit, njit_parallel, numba_threads, prange
-from infercnvpy._util import _as_matrix, _params_for_uns
+from infercnvpy._util import _as_matrix, _obs_column, _params_for_uns
 
 
 @njit
@@ -74,7 +74,9 @@ def _hop_dense(g_indptr, g_indices, g_data, alpha, X, out):  # pragma: no cover
 
 @njit
 def _icm(indptr, indices, weights, unary, labels, beta, n_iter):  # pragma: no cover
-    """Iterated conditional modes for a Potts model, in place on `labels` (-1 = unlabelled). Returns the sweeps run.
+    """Iterated conditional modes for a Potts model, in place on `labels` (-1 = unlabelled).
+
+    Returns the sweeps run and whether the last one changed no label.
 
     Cells are visited in index order and each update is seen by the cells after it (Gauss-Seidel), so the result is
     deterministic. With symmetric `weights`, every update lowers the energy, so the sweeps stop at a local minimum.
@@ -107,16 +109,16 @@ def _icm(indptr, indices, weights, unary, labels, beta, n_iter):  # pragma: no c
                 labels[i] = best
                 changed += 1
         if changed == 0:
-            return sweep + 1
-    return n_iter
+            return sweep + 1, True
+    return n_iter, False
 
 
 def _graph(adata: AnnData, connectivity_key: str) -> sp.csr_matrix:
-    if connectivity_key.endswith("_distances"):
+    if connectivity_key == "distances" or connectivity_key.endswith("_distances"):
         raise ValueError(
             f"`connectivity_key={connectivity_key!r}` looks like a distance matrix. The graph weights must be "
             "similarities or binary connectivities, where a larger weight means a closer neighbour, e.g. "
-            f"{connectivity_key.removesuffix('_distances') + '_connectivities'!r}."
+            f"{connectivity_key.removesuffix('distances') + 'connectivities'!r}."
         )
     if connectivity_key not in adata.obsp:
         raise KeyError(
@@ -331,7 +333,7 @@ def spatial_regions(
     if beta < 0:
         raise ValueError(f"`beta` must be non-negative, got {beta}.")
     key_added = f"{key}_spatial" if key_added is None else key_added
-    labels_in = adata.obs[key].astype("category")
+    labels_in = _obs_column(adata, key).astype("category")
     categories = labels_in.cat.categories
     labels = labels_in.cat.codes.to_numpy().astype(np.int64)
     k = len(categories)
@@ -354,14 +356,16 @@ def spatial_regions(
     G = _graph(adata, connectivity_key)
     if G.shape != (adata.n_obs, adata.n_obs):
         raise ValueError(f"`adata.obsp[{connectivity_key!r}]` has shape {G.shape}, expected {(adata.n_obs,) * 2}.")
-    G.setdiag(0)
-    G.eliminate_zeros()
     W = ((G + G.T) / 2).tocsr()
+    W.setdiag(0)
+    W.eliminate_zeros()
     W.data *= adata.n_obs / max(W.data.sum(), np.finfo(float).tiny)  # the mean row sum is 1
 
     before = labels.copy()
     start = log.debug("spatial_regions: %d cells, %d classes, beta=%g", adata.n_obs, k, beta)
-    n_sweeps = _icm(W.indptr, W.indices, W.data, unary, labels, float(beta), n_iter) if beta > 0 else 0
+    n_sweeps, converged = 0, True
+    if beta > 0:
+        n_sweeps, converged = _icm(W.indptr, W.indices, W.data, unary, labels, float(beta), n_iter)
     n_changed = int(np.count_nonzero(labels != before))
     log_result(
         "spatial_regions",
@@ -369,7 +373,7 @@ def spatial_regions(
         *(n_changed, adata.n_obs, key, n_sweeps),
         time=start,
     )
-    if n_sweeps == n_iter and n_iter > 0:
+    if not converged and n_iter > 0:
         log.info("spatial_regions: stopped after `n_iter=%d` sweeps before convergence", n_iter)
 
     result = pd.Series(pd.Categorical.from_codes(labels, categories=categories), index=adata.obs_names, name=key_added)

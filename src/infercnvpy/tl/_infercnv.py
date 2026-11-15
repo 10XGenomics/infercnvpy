@@ -15,7 +15,7 @@ from numpy.lib.stride_tricks import sliding_window_view
 
 from infercnvpy._logging import SKIP_OWN_FRAMES, log, log_result
 from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _params_for_uns
+from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column, _params_for_uns
 from infercnvpy.tl._infercnv_kernels import (
     _cnv_csr,
     _cnv_dense,
@@ -208,13 +208,13 @@ def infercnv(
     positions: Any = adata.var[["chromosome", "start", "end"]]
     # the lazy `var` of `anndata.experimental.read_lazy` has to be loaded
     var: pd.DataFrame = positions.to_memory() if hasattr(positions, "to_memory") else positions
-    var_mask = var["chromosome"].isnull()
+    var_mask = var["chromosome"].isnull() | var["start"].isnull()
     n_unplaced = int(var_mask.sum())
     if exclude_chromosomes is not None:
         var_mask = var_mask | var["chromosome"].isin(exclude_chromosomes)
-    if not var.loc[~var_mask, "chromosome"].astype(str).str.startswith("chr").any():
+    if not _on_used_chromosomes(var, var_mask.to_numpy()).any():
         raise ValueError(
-            'None of the chromosome names in `adata.var["chromosome"]` start with "chr". '
+            'None of the chromosome names in `adata.var["chromosome"]` start with "chr" (chrM is not used). '
             'infercnvpy only uses chromosomes named like "chr1". Add the prefix, e.g. with '
             '`adata.var["chromosome"] = "chr" + adata.var["chromosome"].astype(str)`.'
         )
@@ -235,8 +235,11 @@ def infercnv(
             low = (_means(source, all_cells, 1, lazy=lazy, expm1=True)[0] < min_mean) & ~mask
             n_low = int(low.sum())
             mask = mask | low
-            if mask.all():
-                raise ValueError(f"No genes left: all genes have a mean expression below `min_mean={min_mean}`.")
+            if not _on_used_chromosomes(var, mask).any():
+                raise ValueError(
+                    f"No genes left: all genes on chromosomes named like chr1 have a mean expression below "
+                    f"`min_mean={min_mean}`."
+                )
         layout = _Layout(var, mask, window_size, step)
         ref = _get_reference(adata, reference_key, reference_cat, reference, layer, source=source, lazy=lazy)
         plan = _Plan.build(layout, ref, lfc_clip, dynamic_threshold, noise_reference)
@@ -303,10 +306,10 @@ def _natural_sort(l: Sequence):
     return sorted(l, key=alphanum_key)
 
 
-def _obs_column(adata: AnnData, key: str) -> pd.Series:
-    """`adata.obs[key]` as a pandas Series (the `obs` of `anndata.experimental.read_lazy` holds xarray arrays)."""
-    column = adata.obs[key]
-    return column if isinstance(column, pd.Series) else pd.Series(np.asarray(column))
+def _on_used_chromosomes(var: pd.DataFrame, mask: np.ndarray) -> np.ndarray:
+    """Genes not in `mask` on a chromosome infercnvpy uses (named like "chr1", not "chrM")."""
+    chromosome = var["chromosome"].astype(str)
+    return ~mask & chromosome.str.startswith("chr").to_numpy() & (chromosome != "chrM").to_numpy()
 
 
 def _categories(reference_cat: str | Sequence[str]) -> np.ndarray:
@@ -327,7 +330,7 @@ class _Layout:
         chromosomes = _natural_sort([x for x in used["chromosome"].unique() if x.startswith("chr") and x != "chrM"])
         order, geometry, scatter, starts, ends = [], [], [], [], []
         self.chr_pos: dict[str, int] = {}
-        n_genes = n_windows = self.n_covered = 0
+        n_genes = n_windows = 0
         for chromosome in chromosomes:
             # `sort_values` is not stable: genes with the same start keep the order infercnvpy has always used
             genes = used.loc[used["chromosome"] == chromosome].sort_values("start").index.to_numpy()
@@ -340,9 +343,10 @@ class _Layout:
             K = len(range(0, g - n + 1, step))
             pos = used.loc[genes]
             starts.append(pos["start"].to_numpy(dtype=np.int64)[: (K - 1) * step + 1 : step])
-            ends.append(sliding_window_view(pos["end"].to_numpy(dtype=np.int64), n)[::step][:K].max(axis=1))
+            end = pos["end"].fillna(pos["start"]).to_numpy(dtype=np.int64)  # a gene without an end ends at its start
+            ends.append(sliding_window_view(end, n)[::step][:K].max(axis=1))
             order.append(var.index.get_indexer(genes))
-            geometry.append((n_genes, g, a, b, K, n_windows, n))
+            geometry.append((n_genes, g, a, b, K, n_windows))
             # per gene: the windows `first .. last` that contain it, and its pyramid weight in each
             i = np.arange(g)
             first = np.maximum(0, (i - n + step) // step)
@@ -351,7 +355,6 @@ class _Layout:
                 (n_windows + first, last - first + 1, i - first * step, np.full(g, n), np.full(g, min(a, b)))
             )
             self.chr_pos[chromosome] = n_windows
-            self.n_covered += min(g, (K - 1) * step + n)
             n_genes += g
             n_windows += K
         #: column in `var` of each gene in genomic order
@@ -364,7 +367,7 @@ class _Layout:
         self.col_map[self.order] = np.arange(n_genes)
         self.n_vars = len(var)
         self.n_windows = n_windows
-        g0s, gs, As, Bs, Ks, w0s, ns = (np.array(x, dtype=np.int64) for x in zip(*geometry, strict=True))
+        g0s, gs, As, Bs, Ks, w0s = (np.array(x, dtype=np.int64) for x in zip(*geometry, strict=True))
         self.geometry = (g0s, gs, As, Bs, Ks, w0s, step)
         self.step = step
         first, n_in, offset, length, ab = (np.concatenate(x).astype(np.int64) for x in zip(*scatter, strict=True))
@@ -378,7 +381,8 @@ class _Layout:
         self.scatter = (first, weights)
         #: per window: the sum of its pyramid weights
         self.window_weight = np.repeat((As * Bs).astype(np.float64), Ks)
-        self.gene_geometry = (gs, ns, Ks, w0s, g0s, step, self.order, self.n_covered)
+        #: what `_gene_values` needs: windows per chromosome, and per gene the windows that contain it
+        self.gene_geometry = (g0s, gs, Ks, w0s, first, n_in, self.order)
 
 
 @dataclass(frozen=True)
@@ -437,6 +441,8 @@ def _windows(
         _cnv_csr(X.data, X.indices, X.indptr, *shared, serial=serial)
     else:
         _cnv_dense(X, *shared, serial=serial)
+    if np.isnan(rowstats[:, 0]).any():
+        raise ValueError("infercnv needs finite values, but the expression matrix or the reference contains NaN.")
     return windows, rowstats, counts
 
 

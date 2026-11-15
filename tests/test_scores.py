@@ -124,3 +124,35 @@ def test_positional_groupby_is_deprecated(adata_ithgex, func):
         func(adata_ithgex, "group", groupby="group")
     with pytest.raises(TypeError, match="positional arguments"):
         func(adata_ithgex, "group", "extra")
+
+
+def test_ith_logs_only_sampled_groups(adata_ithgex, caplog):
+    """A group counts as sampled by its cells left after the constant ones are dropped."""
+    X = adata_ithgex.obsm["X_cnv"]
+    X = np.array(X.toarray() if sp.issparse(X) else X, dtype=float)
+    X[0] = 0  # A keeps 4 of 5 cells: 16 matrix entries
+    adata_ithgex.obsm["X_cnv"] = X
+
+    def sampled(n_pairs):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=LOGGER):
+            cnv.tl.ithcna(adata_ithgex, groupby="group", n_pairs=n_pairs, inplace=False)
+        return [r.getMessage() for r in caplog.records if r.name == LOGGER and "sampled" in r.getMessage()]
+
+    assert sampled(20) == []
+    assert sampled(10) == ["ithcna: estimated from 10 sampled cell pairs for groups A"]
+
+
+@pytest.mark.parametrize("func", [cnv.tl.ithgex, cnv.tl.ithcna])
+def test_ith_leaves_out_unused_categories(adata_ithgex, func):
+    expected = func(adata_ithgex, groupby="group", inplace=False)
+    adata_ithgex.obs["group"] = adata_ithgex.obs["group"].astype("category").cat.add_categories("unused")
+    assert func(adata_ithgex, groupby="group", inplace=False) == expected
+    func(adata_ithgex, groupby="group", key_added="ith")
+    np.testing.assert_array_equal(adata_ithgex.obs["ith"], adata_ithgex.obs["group"].map(expected).astype(float))
+
+
+def test_cnv_score_obs_key_warns_at_the_caller(adata_ithgex):
+    with pytest.warns(FutureWarning, match="obs_key") as record:
+        cnv.tl.cnv_score(adata_ithgex, obs_key="group", inplace=False)
+    assert record[0].filename == __file__

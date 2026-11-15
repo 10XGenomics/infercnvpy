@@ -34,7 +34,7 @@ TILE = 2048  # rows per block: a block of correlations is TILE x cells float32
 
 @njit_parallel
 def _standardize_dense(X, out):  # pragma: no cover
-    """Centre each row and scale it to unit norm; a constant row becomes NaN."""
+    """Centre each row and scale it to unit norm; a constant row becomes NaN. `out` may be `X`."""
     n, g = X.shape
     for i in prange(n):
         m = 0.0
@@ -49,26 +49,6 @@ def _standardize_dense(X, out):  # pragma: no cover
         inv = 1.0 / np.sqrt(ss) if ss > 0 else np.nan
         for c in range(g):
             out[i, c] *= inv
-
-
-@njit_parallel
-def _standardize_csr(indptr, indices, data, n_cols, out):  # pragma: no cover
-    """Like `_standardize_dense`, straight from CSR into a dense float32 row (no float64 densification)."""
-    n = len(indptr) - 1
-    for i in prange(n):
-        s = 0.0
-        q = 0.0
-        for k in range(indptr[i], indptr[i + 1]):
-            s += data[k]
-            q += data[k] * data[k]
-        m = s / n_cols
-        ss = q - s * m  # sum of squared deviations, implicit zeros included
-        inv = 1.0 / np.sqrt(ss) if ss > 0 else np.nan
-        fill = -m * inv
-        for c in range(n_cols):
-            out[i, c] = fill
-        for k in range(indptr[i], indptr[i + 1]):
-            out[i, indices[k]] = (data[k] - m) * inv
 
 
 @njit_parallel
@@ -130,18 +110,19 @@ def corr_iqr(
     n_pairs: int | None = None,
     rng: np.random.Generator | None = None,
     exclude_self_pairs: bool = False,
-) -> tuple[float, int]:
+) -> tuple[float, int, bool]:
     """IQR of the Pearson correlations between all rows of `X` (numpy array or scipy sparse matrix).
 
     Rows with constant values have no defined correlation and are left out. Returns the IQR (NaN with fewer than two
-    rows left) and the number of rows left out. With `n_pairs`, groups with more than `n_pairs` matrix entries are
-    estimated from a uniform sample of entries. With `exclude_self_pairs`, the diagonal (each row with itself) is not
-    counted.
+    rows left), the number of rows left out, and whether it was estimated from sampled pairs. With `n_pairs`, groups
+    with more than `n_pairs` matrix entries are estimated from a uniform sample of entries. With `exclude_self_pairs`,
+    the diagonal (each row with itself) is not counted.
     """
     Z = np.empty(X.shape, dtype=np.float32)
     if sp.issparse(X):
         X = sp.csr_matrix(X)
-        _standardize_csr(X.indptr, X.indices, X.data.astype(np.float32, copy=False), X.shape[1], Z)
+        X.astype(np.float32, copy=False).toarray(out=Z)  # sums duplicate entries
+        _standardize_dense(Z, Z)
     else:
         _standardize_dense(np.ascontiguousarray(X, dtype=np.float32), Z)
     keep = ~np.isnan(Z[:, 0]) if X.shape[1] else np.zeros(X.shape[0], dtype=bool)
@@ -149,7 +130,7 @@ def corr_iqr(
     n = Z.shape[0]
     n_dropped = X.shape[0] - n
     if n <= 1:
-        return np.nan, n_dropped
+        return np.nan, n_dropped, False
     n_entries = n * (n - 1) if exclude_self_pairs else n * n
     if n_pairs is not None and n_entries > n_pairs:
         rng = np.random.default_rng() if rng is None else rng
@@ -162,7 +143,7 @@ def corr_iqr(
         r = np.empty(n_pairs, dtype=np.float32)
         _sampled_corr(Z, rows, cols, r)
         q75, q25 = np.percentile(r, [75, 25])
-        return float(q75 - q25), n_dropped
+        return float(q75 - q25), n_dropped, True
     if n <= tile:
         # one block: the exact float64 quantiles cost at most tile^2 values, as before 0.7.0
         rows = X[np.flatnonzero(keep)]
@@ -170,7 +151,7 @@ def corr_iqr(
         if exclude_self_pairs:
             C = C[~np.eye(n, dtype=bool)]
         q75, q25 = np.percentile(C, [75, 25])
-        return q75 - q25, n_dropped
+        return q75 - q25, n_dropped, False
     hists = np.zeros((numba.get_num_threads() if _on_main_thread() else 1, N_BINS), dtype=np.int64)
     for r0 in range(0, n, tile):
         _bin_tile(Z[r0 : r0 + tile] @ Z[r0:].T, r0, hists)
@@ -178,4 +159,4 @@ def corr_iqr(
     if not exclude_self_pairs:
         hist[-1] += n  # the diagonal: every cell correlates 1 with itself
     q75, q25 = _quantiles(hist, (0.75, 0.25))
-    return q75 - q25, n_dropped
+    return q75 - q25, n_dropped, False

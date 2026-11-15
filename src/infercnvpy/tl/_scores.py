@@ -11,12 +11,12 @@ from anndata import AnnData
 from infercnvpy._logging import SKIP_OWN_FRAMES, log, log_result
 from infercnvpy._numba import numba_threads
 from infercnvpy._util import (
-    _as_df,
     _as_matrix,
     _choose_mtx_rep,
     _deprecated_positional,
     _is_backed,
     _is_dask,
+    _obs_column,
     _params_for_uns,
 )
 
@@ -80,14 +80,14 @@ def cnv_score(
             "The obs_key argument has been renamed to `groupby` for consistency with "
             "other functions and will be removed in the future. ",
             category=FutureWarning,
-            stacklevel=2,
+            skip_file_prefixes=SKIP_OWN_FRAMES,
         )
         groupby = obs_key
 
     if groupby not in adata.obs.columns and groupby == "cnv_leiden":
         raise ValueError("`cnv_leiden` not found in `adata.obs`. Did you run `tl.leiden`?")
     X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`obsm['X_{use_rep}']`", lazy=True)
-    groups = _as_df(adata.obs)[groupby]
+    groups = _obs_column(adata, groupby)
     if _is_dask(X) or _is_backed(X):
         cluster_score = _abs_group_means(X, groups)
     else:
@@ -95,7 +95,7 @@ def cnv_score(
     log_result("cnv_score", "scored %d groups of %r", len(cluster_score), groupby)
 
     if inplace:
-        score_array = np.array([cluster_score[c] for c in adata.obs[groupby]])
+        score_array = np.array([cluster_score[c] for c in groups])
         adata.obs[key_added] = score_array
         adata.uns[key_added] = {"params": _params_for_uns(groupby=groupby, use_rep=use_rep)}
         return None
@@ -338,19 +338,21 @@ def _ith(
     exclude_self_pairs: bool,
 ):
     """IQR of the cell-cell correlations of the rows of `X` within each group of `adata.obs[groupby]`."""
-    codes = adata.obs[groupby].astype("category").cat
+    codes = _obs_column(adata, groupby).astype("category").cat
     with numba_threads(n_jobs):
         rng = np.random.default_rng(random_state)
         sizes = np.bincount(codes.codes[codes.codes >= 0], minlength=len(codes.categories))
-        if n_pairs is not None and (
-            sampled := [str(g) for g, n in zip(codes.categories, sizes, strict=True) if n * n > n_pairs]
-        ):
-            log.info("%s: estimated from %d sampled cell pairs for groups %s", key_added, n_pairs, ", ".join(sampled))
-        scores, heavy = {}, []
+        values = np.full(len(sizes) + 1, np.nan)  # the last one for code -1 (no group)
+        scores, sampled, heavy = {}, [], []
         for i, group in enumerate(codes.categories):
-            scores[group], n_dropped = corr_iqr(
+            if not sizes[i]:  # unused categories are left out, as before 0.7.0
+                continue
+            scores[group], n_dropped, was_sampled = corr_iqr(
                 X[np.flatnonzero(codes.codes == i)], n_pairs=n_pairs, rng=rng, exclude_self_pairs=exclude_self_pairs
             )
+            values[i] = scores[group]
+            if was_sampled:
+                sampled.append(str(group))
             if n_dropped:
                 log.info(
                     "%s: left out %d of %d cells of group %s with a constant profile (no defined correlation)",
@@ -358,6 +360,8 @@ def _ith(
                 )
                 if n_dropped > 0.2 * sizes[i]:
                     heavy.append(f"{group} ({n_dropped} of {sizes[i]})")
+    if sampled:
+        log.info("%s: estimated from %d sampled cell pairs for groups %s", key_added, n_pairs, ", ".join(sampled))
     if heavy:
         log.warning(
             "%s: more than 20%% of the cells of groups %s have a constant profile and were left out",
@@ -366,5 +370,5 @@ def _ith(
         )
     if not inplace:
         return scores
-    adata.obs[key_added] = np.array([*scores.values(), np.nan])[codes.codes]  # code -1 (no group) -> NaN
+    adata.obs[key_added] = values[codes.codes]
     return None

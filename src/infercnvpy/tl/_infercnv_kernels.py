@@ -27,13 +27,16 @@ from infercnvpy._numba import njit, njit_parallel, prange
 
 @njit
 def _lfc(v, lo, hi, cap):
-    """Clipped log fold change of `v` against the reference bounds `[lo, hi]` (`lo == hi` for one reference)."""
+    """Clipped log fold change of `v` against the reference bounds `[lo, hi]` (`lo == hi` for one reference).
+
+    NaN in `v`, `lo` or `hi` gives NaN.
+    """
     if v > hi:
         d = v - hi
-    elif v < lo:
-        d = v - lo
-    else:
+    elif v >= lo:
         return np.float32(0)
+    else:
+        d = v - lo
     if d > cap:
         return cap
     if d < -cap:
@@ -274,14 +277,15 @@ def _fill_kept(out, thr, centre, indptr, data, indices):
 
 
 @njit_parallel
-def _gene_values(out, gs, ns, Ks, w0s, g0s, step, order, n_covered, thr, centre, gv, n_chunks):
-    """Per gene: mean of the kept windows that contain it, median-centred over all covered genes, denoised.
+def _gene_values(out, g0s, gs, Ks, w0s, first, n_in, cols, thr, centre, gv, n_chunks):
+    """Per gene: mean of the kept windows that contain it, median-centred over these genes, denoised.
 
-    `out` holds the centred windows of a block of cells; `ns` the window length per chromosome (the number of genes
-    for a chromosome that is a single window). Values are written into `gv` (cells x all genes of `adata`, prefilled
-    with NaN) at the column `order[gene]`. A window prefix sum makes this O(1) per gene.
+    `out` holds the centred windows of a block of cells. Per gene in genomic order, `first` is the first window that
+    contains it and `n_in` how many do (genes in none are skipped). Values are written into `gv` (cells x all genes of
+    `adata`, prefilled with NaN) at the column `cols[gene]`. A window prefix sum makes this O(1) per gene.
     """
     n_rows = out.shape[0]
+    n_covered = np.count_nonzero(n_in > 0)
     pw = np.empty((n_chunks, Ks.max() + 1))
     vals = np.empty((n_chunks, n_covered))
     buf = np.empty((n_chunks, n_covered))
@@ -291,23 +295,22 @@ def _gene_values(out, gs, ns, Ks, w0s, g0s, step, order, n_covered, thr, centre,
         for r in range(t * n_rows // n_chunks, (t + 1) * n_rows // n_chunks):
             q = 0
             for c in range(gs.size):
-                K = Ks[c]
-                n = ns[c]
+                w0 = w0s[c]
                 pwt[0] = 0.0
-                for w in range(K):
-                    pwt[w + 1] = pwt[w] + out[r, w0s[c] + w]
-                for i in range(min(gs[c], (K - 1) * step + n)):
-                    first = 0 if i < n else (i - n) // step + 1  # first window that contains gene i
-                    last = min(K - 1, i // step)
-                    vt[q] = (pwt[last + 1] - pwt[first]) / (last - first + 1)
-                    q += 1
+                for w in range(Ks[c]):
+                    pwt[w + 1] = pwt[w] + out[r, w0 + w]
+                for j in range(g0s[c], g0s[c] + gs[c]):
+                    if n_in[j] > 0:
+                        f = first[j] - w0
+                        vt[q] = (pwt[f + n_in[j]] - pwt[f]) / n_in[j]
+                        q += 1
             med = _median(vt, buf[t])
             q = 0
-            for c in range(gs.size):
-                for i in range(min(gs[c], (Ks[c] - 1) * step + ns[c])):
+            for j in range(n_in.size):
+                if n_in[j] > 0:
                     v = vt[q] - med
                     q += 1
-                    gv[r, order[g0s[c] + i]] = 0 if abs(v - centre) < thr else v
+                    gv[r, cols[j]] = 0 if abs(v - centre) < thr else v
 
 
 @njit_parallel

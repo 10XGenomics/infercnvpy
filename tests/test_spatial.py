@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -169,6 +171,30 @@ def test_spatial_regions_fills_missing_labels():
     assert np.mean(res.to_numpy() == truth) > 0.99
 
 
+def test_spatial_regions_leaves_graph_untouched():
+    adata, _ = _grid()
+    G = adata.obsp["spatial_connectivities"]
+    G.setdiag(1.0)  # a graph with self loops stored, e.g. squidpy `set_diag=True`
+    before = G.copy()
+    cnv.tl.spatial_regions(adata, key="call", beta=4)
+    after = adata.obsp["spatial_connectivities"]
+    assert after.nnz == before.nnz
+    assert len(after.data) == len(before.data)
+    assert (after != before).nnz == 0
+
+
+def test_spatial_regions_convergence_log(caplog):
+    adata, _ = _grid()
+    cnv.tl.spatial_regions(adata, key="call", beta=4)
+    n_sweeps = adata.uns["call_spatial"]["params"]["n_sweeps"]
+    with caplog.at_level(logging.INFO, logger="scverse.infercnvpy"):
+        cnv.tl.spatial_regions(adata, key="call", beta=4, n_iter=n_sweeps)
+    assert not any("before convergence" in r.getMessage() for r in caplog.records)
+    with caplog.at_level(logging.INFO, logger="scverse.infercnvpy"):
+        cnv.tl.spatial_regions(adata, key="call", beta=4, n_iter=n_sweeps - 1)
+    assert any("before convergence" in r.getMessage() for r in caplog.records)
+
+
 def test_graph_weights_must_not_be_distances(graph_and_cnv):
     G, X = graph_and_cnv
     adata = AnnData(obs=pd.DataFrame(index=[str(i) for i in range(X.shape[0])]), obsm={"X_cnv": X})
@@ -178,6 +204,9 @@ def test_graph_weights_must_not_be_distances(graph_and_cnv):
         cnv.tl.smooth_cnv(adata, connectivity_key="spatial_distances")
     with pytest.raises(ValueError, match="similarities"):
         cnv.tl.spatial_regions(adata, key="x", connectivity_key="spatial_distances")
+    adata.obsp["distances"] = G
+    with pytest.raises(ValueError, match="'connectivities'"):
+        cnv.tl.smooth_cnv(adata, connectivity_key="distances")
 
 
 def _with_windows(starts, ends):

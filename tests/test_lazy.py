@@ -223,6 +223,32 @@ def test_read_lazy(expected, zarr_store):
     assert isinstance(a.obsm["X_cnv"], sp.csr_matrix)
 
 
+def test_read_lazy_downstream(base, tmp_path):
+    """Scores and heatmaps read the groups from the lazy `obs` of `anndata.experimental.read_lazy`."""
+    import matplotlib.pyplot as plt
+
+    b = base.copy()
+    cnv.tl.infercnv(b, **REF)
+    b.obs["cell_type"] = b.obs["cell_type"].astype("category")
+    b.write_zarr(tmp_path / "cnv.zarr")
+    a = ad.experimental.read_lazy(tmp_path / "cnv.zarr")
+    assert not isinstance(a.obs, pd.DataFrame)
+    # the lazy CNV matrix is summed in float64
+    expected = cnv.tl.cnv_score(b, groupby="cell_type", inplace=False)
+    assert cnv.tl.cnv_score(a, groupby="cell_type", inplace=False) == pytest.approx(expected, rel=1e-6)
+    cnv.tl.cnv_score(a, groupby="cell_type")
+    cnv.tl.cnv_score(b, groupby="cell_type")
+    np.testing.assert_allclose(np.asarray(a.obs["cnv_score"]), b.obs["cnv_score"], rtol=1e-6)
+    cnv.pl.chromosome_heatmap(a, groupby="cell_type", show=False)
+    cnv.pl.chromosome_heatmap_summary(a, groupby="cell_type", show=False)
+    plt.close("all")
+    a.obsm["X_cnv"] = a.obsm["X_cnv"].compute()  # ithcna needs the CNV matrix in memory
+    lazy_ith = cnv.tl.ithcna(a, groupby="cell_type", inplace=False)
+    ith = cnv.tl.ithcna(b, groupby="cell_type", inplace=False)
+    assert list(lazy_ith) == list(ith)
+    np.testing.assert_array_equal(list(lazy_ith.values()), list(ith.values()))
+
+
 def test_unplaced_and_extra_features(base, expected):
     """Features without a position (e.g. control probes of a spatial panel) are skipped in lazy input too."""
     n_ctrl = 20

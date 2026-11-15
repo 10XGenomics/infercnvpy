@@ -95,7 +95,7 @@ FORMATS = {
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
-@pytest.mark.parametrize(("window_size", "step"), [(30, 5), (7, 1), (1000, 10)])
+@pytest.mark.parametrize(("window_size", "step"), [(30, 5), (7, 1), (1000, 10), (3, 10), (1, 4)])
 @pytest.mark.parametrize("n_ref", [1, 2])
 @pytest.mark.parametrize("noise_reference", ["reference", "all"])
 @pytest.mark.parametrize("sparse_cost", [0.0, 1e9], ids=["prefix_sums", "sparse"])
@@ -209,13 +209,15 @@ def test_n_jobs(oligo):
             _run(oligo, n_jobs=n_jobs)
 
 
-def test_runs_serially_outside_the_main_thread(oligo):
+@pytest.mark.parametrize("window_size", [100, 5])
+def test_runs_serially_outside_the_main_thread(oligo, window_size):
     """In another thread, the serial kernels run (a parallel kernel would abort with numba's workqueue layer)."""
+    kw = {"chunksize": 50, "calculate_gene_values": True, "window_size": window_size}
     results = []
-    thread = threading.Thread(target=lambda: results.append(_run(oligo, chunksize=50, calculate_gene_values=True)))
+    thread = threading.Thread(target=lambda: results.append(_run(oligo, **kw)))
     thread.start()
     thread.join()
-    _assert_identical(results[0], _run(oligo, chunksize=50, calculate_gene_values=True))
+    _assert_identical(results[0], _run(oligo, **kw))
 
 
 def test_records_noise_reference(oligo):
