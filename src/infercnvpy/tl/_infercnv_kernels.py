@@ -15,7 +15,7 @@ Then the median of the cell is subtracted and the windows are written as float32
 squares of the written values for the noise threshold and the number of values outside the noise band.
 
 Scratch buffers are allocated once per call, one row per chunk of cells, outside the `prange` loop: allocating inside
-the loop body serialises the threads on numba's allocator lock. `np.median` would allocate too, hence `_median`.
+the loop body serializes the threads on numba's allocator lock. `np.median` would allocate too, hence `_median`.
 """
 
 from __future__ import annotations
@@ -136,6 +136,25 @@ def _normalise(win, n_windows, window_weight):
 
 
 @njit
+def _kept(v, thr, centre):
+    """Whether a centered window value is kept: non-zero and outside the noise band `centre ± thr`."""
+    return v != 0 and abs(np.float64(v) - centre) >= thr
+
+
+@njit
+def _scratch(n_chunks, n_genes, gs, n_windows, span):
+    """Scratch rows per chunk of cells: gene values, the two prefix sums, window sums (`span` spare), median buffer."""
+    max_g = gs.max() + 1
+    return (
+        np.empty((n_chunks, n_genes), np.float32),
+        np.empty((n_chunks, max_g)),
+        np.empty((n_chunks, max_g)),
+        np.empty((n_chunks, n_windows + span)),
+        np.empty((n_chunks, n_windows)),
+    )
+
+
+@njit
 def _center_emit(win, buf, thr, centre, out, r, rowstats, counts):
     """Subtract the median from the running means `win`, write them to `out[r]` as float32.
 
@@ -153,7 +172,7 @@ def _center_emit(win, buf, thr, centre, out, r, rowstats, counts):
             out[r, w] = v
         total += v
         squares += np.float64(v) * v
-        if v != 0 and abs(np.float64(v) - centre) >= thr:
+        if _kept(v, thr, centre):
             kept += 1
     rowstats[r, 0] = total
     rowstats[r, 1] = squares
@@ -165,7 +184,7 @@ def _cnv_csr(
     data, indices, indptr, rows, col_map, lo, hi, base, cap, g0s, gs, As, Bs, Ks, w0s, step,
     first, weights, window_weight, base_sums, max_nnz, thr, centre, out, rowstats, counts, n_chunks,
 ):  # fmt: skip
-    """Centred windows of the CSR rows `rows` into `out`, see `_center_emit`.
+    """Centered windows of the CSR rows `rows` into `out`, see `_center_emit`.
 
     A row with at most `max_nnz` stored values starts from `base_sums`, the weighted window sums of the baseline `base`,
     and adds the difference to the baseline of each stored value to the windows that contain it (`_scatter`). Other
@@ -174,12 +193,7 @@ def _cnv_csr(
     """
     n_rows = rows.size
     n_windows = out.shape[1]
-    max_g = gs.max() + 1
-    x = np.empty((n_chunks, base.size), np.float32)
-    p1 = np.empty((n_chunks, max_g))
-    p2 = np.empty((n_chunks, max_g))
-    win = np.empty((n_chunks, n_windows + weights.shape[1]))
-    buf = np.empty((n_chunks, n_windows))
+    x, p1, p2, win, buf = _scratch(n_chunks, base.size, gs, n_windows, weights.shape[1])
     for t in prange(n_chunks):
         xt = x[t]
         wt = win[t]
@@ -213,12 +227,7 @@ def _cnv_dense(
     """Same as `_cnv_csr` for the rows `rows` of the dense matrix `X`; values that differ from the baseline count."""
     n_rows = rows.size
     n_windows = out.shape[1]
-    max_g = gs.max() + 1
-    x = np.empty((n_chunks, base.size), np.float32)
-    p1 = np.empty((n_chunks, max_g))
-    p2 = np.empty((n_chunks, max_g))
-    win = np.empty((n_chunks, n_windows + weights.shape[1]))
-    buf = np.empty((n_chunks, n_windows))
+    x, p1, p2, win, buf = _scratch(n_chunks, base.size, gs, n_windows, weights.shape[1])
     pos = np.empty((n_chunks, max_nnz + 1), np.int64)
     diff = np.empty((n_chunks, max_nnz + 1))
     n_cols = X.shape[1]
@@ -256,8 +265,7 @@ def _count_kept(out, thr, centre, counts):
     for r in prange(n_rows):
         c = 0
         for w in range(n_windows):
-            v = out[r, w]
-            if v != 0 and abs(np.float64(v) - centre) >= thr:
+            if _kept(out[r, w], thr, centre):
                 c += 1
         counts[r] = c
 
@@ -270,7 +278,7 @@ def _fill_kept(out, thr, centre, indptr, data, indices):
         k = indptr[r]
         for w in range(n_windows):
             v = out[r, w]
-            if v != 0 and abs(np.float64(v) - centre) >= thr:
+            if _kept(v, thr, centre):
                 data[k] = v
                 indices[k] = w
                 k += 1
@@ -278,9 +286,9 @@ def _fill_kept(out, thr, centre, indptr, data, indices):
 
 @njit_parallel
 def _gene_values(out, g0s, gs, Ks, w0s, first, n_in, cols, thr, centre, gv, n_chunks):
-    """Per gene: mean of the kept windows that contain it, median-centred over these genes, denoised.
+    """Per gene: mean of the kept windows that contain it, median-centered over these genes, denoised.
 
-    `out` holds the centred windows of a block of cells. Per gene in genomic order, `first` is the first window that
+    `out` holds the centered windows of a block of cells. Per gene in genomic order, `first` is the first window that
     contains it and `n_in` how many do (genes in none are skipped). Values are written into `gv` (cells x all genes of
     `adata`, prefilled with NaN) at the column `cols[gene]`. A window prefix sum makes this O(1) per gene.
     """
@@ -314,8 +322,11 @@ def _gene_values(out, g0s, gs, Ks, w0s, first, n_in, cols, thr, centre, gv, n_ch
 
 
 @njit_parallel
-def _group_sums_csr(data, indices, indptr, rows, groups, sums):
-    """`sums[t, groups[i]] += X[rows[i]]` for the CSR matrix `X`, where `t` is the chunk of `i` (one per `sums[t]`)."""
+def _group_sums_csr(data, indices, indptr, rows, groups, expm1, sums):
+    """`sums[t, groups[i]] += X[rows[i]]` for the CSR matrix `X`, where `t` is the chunk of `i` (one per `sums[t]`).
+
+    With `expm1`, the sums are of `expm1(X)` (the counts behind log-normalized values; implicit zeros stay 0).
+    """
     n_chunks = sums.shape[0]
     n = rows.size
     for t in prange(n_chunks):
@@ -324,11 +335,12 @@ def _group_sums_csr(data, indices, indptr, rows, groups, sums):
             s = st[groups[i]]
             r = rows[i]
             for k in range(indptr[r], indptr[r + 1]):
-                s[indices[k]] += data[k]
+                v = np.float64(data[k])
+                s[indices[k]] += np.expm1(v) if expm1 else v
 
 
 @njit_parallel
-def _group_sums_dense(X, rows, groups, sums):
+def _group_sums_dense(X, rows, groups, expm1, sums):
     """Same as `_group_sums_csr` for the dense matrix `X`."""
     n_chunks = sums.shape[0]
     n = rows.size
@@ -338,35 +350,8 @@ def _group_sums_dense(X, rows, groups, sums):
             s = st[groups[i]]
             r = rows[i]
             for j in range(X.shape[1]):
-                s[j] += X[r, j]
-
-
-@njit_parallel
-def _group_expm1_sums_csr(data, indices, indptr, rows, groups, sums):
-    """Like `_group_sums_csr`, of `expm1(X)` (the counts behind log-normalised values; implicit zeros stay 0)."""
-    n_chunks = sums.shape[0]
-    n = rows.size
-    for t in prange(n_chunks):
-        st = sums[t]
-        for i in range(t * n // n_chunks, (t + 1) * n // n_chunks):
-            s = st[groups[i]]
-            r = rows[i]
-            for k in range(indptr[r], indptr[r + 1]):
-                s[indices[k]] += np.expm1(np.float64(data[k]))
-
-
-@njit_parallel
-def _group_expm1_sums_dense(X, rows, groups, sums):
-    """Same as `_group_expm1_sums_csr` for the dense matrix `X`."""
-    n_chunks = sums.shape[0]
-    n = rows.size
-    for t in prange(n_chunks):
-        st = sums[t]
-        for i in range(t * n // n_chunks, (t + 1) * n // n_chunks):
-            s = st[groups[i]]
-            r = rows[i]
-            for j in range(X.shape[1]):
-                s[j] += np.expm1(np.float64(X[r, j]))
+                v = np.float64(X[r, j])
+                s[j] += np.expm1(v) if expm1 else v
 
 
 @njit_parallel

@@ -5,6 +5,7 @@ from pathlib import Path
 from textwrap import dedent, indent
 
 import pooch
+import scanpy as sc
 from anndata import AnnData, read_h5ad
 from scverse_misc.datasets import DatasetEntry, DownloadCB, fetch, parse_registry, register_loader
 
@@ -16,13 +17,17 @@ _BASE_URL, _DATASETS = parse_registry(Path(__file__).parent / "registry.yaml")
 # scverse-misc keys loaders by type name across all packages in the process, so ours uses the package name.
 @register_loader("infercnvpy")
 def _load_h5ad(entry: DatasetEntry, target: Path, download: DownloadCB, /, **kwargs: object) -> AnnData:
-    # Download into the cache dir itself rather than `target` (`<cache dir>/<type>`),
-    # so files cached by earlier infercnvpy versions are reused.
+    # Download into the cache dir itself rather than `target` (`<cache dir>/<type>`): `_fetch` passes scanpy's
+    # `datasetdir` as the cache dir when infercnvpy 0.6 downloaded the file there, so that file is reused.
     return read_h5ad(download(entry.file(suffix=".h5ad"), dest=target.parent))
 
 
 def _fetch(name: str) -> AnnData:
-    cache_dir = os.environ.get(DATASET_ENV_VAR) or pooch.os_cache("infercnvpy")
+    cache_dir: str | Path | None = os.environ.get(DATASET_ENV_VAR)
+    if not cache_dir:
+        (file,) = _DATASETS[name].files
+        old = Path(sc.settings.datasetdir)  # where infercnvpy 0.6 downloaded maynard2020_3k
+        cache_dir = old if (old / file.name).is_file() else pooch.os_cache("infercnvpy")
     return fetch(_DATASETS[name], cache_dir, base_url=_BASE_URL)
 
 
@@ -33,7 +38,8 @@ _POOCH_INFO = dedent(
 
         By default, the dataset will be downloaded into your operating system's default
         cache directory (See :func:`pooch.os_cache` for more details). If it has already been
-        downloaded, it will be retrieved from the cache.
+        downloaded, it will be retrieved from the cache, or from :attr:`scanpy.settings.datasetdir`
+        if an earlier version of infercnvpy downloaded it there.
 
         You can override the default cache dir by setting the `{DATASET_ENV_VAR}` environment variable
         to a path of your preference.

@@ -44,6 +44,24 @@ def test_get_genomic_position_from_gtf_without_adata(gtf, testdata):
     assert not gene_pos["gene_name"].duplicated().any()
 
 
+def test_gtfparse_2_polars_frame(testdata, monkeypatch):
+    """gtfparse 2 returns a polars DataFrame: it is converted with its `to_pandas`."""
+    import gtfparse
+
+    expected = genomic_position_from_gtf(testdata / "chr21_gencode.gtf")
+
+    class PolarsLike:
+        def __init__(self, df):
+            self.df = df
+
+        def to_pandas(self):
+            return self.df
+
+    read_gtf = gtfparse.read_gtf
+    monkeypatch.setattr(gtfparse, "read_gtf", lambda *args, **kwargs: PolarsLike(read_gtf(*args, **kwargs)))
+    pd.testing.assert_frame_equal(genomic_position_from_gtf(testdata / "chr21_gencode.gtf"), expected)
+
+
 def _genepos_message(caplog, func):
     [msg] = [r.getMessage() for r in caplog.records if r.getMessage().startswith(f"{func}:")]
     return msg

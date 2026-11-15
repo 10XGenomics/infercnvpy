@@ -1,8 +1,10 @@
 import inspect
+import re
 import sys
 import warnings
 from collections.abc import Callable
 from functools import wraps
+from textwrap import dedent, indent
 from typing import Any
 
 import numpy as np
@@ -16,8 +18,10 @@ def _as_matrix(x, what: str = "the expression matrix", *, lazy: bool = False):
     """Narrow an AnnData array to an in-memory numpy array or scipy sparse matrix.
 
     With `lazy`, also accept a dask array or a backed (on-disk) matrix, see `_is_dask` and `_is_backed`. Without it,
-    such a matrix raises an error that tells the user how to load it.
+    such a matrix raises an error that tells the user how to load it. A DataFrame (as obsm allows) gives its values.
     """
+    if isinstance(x, pd.DataFrame):
+        return x.to_numpy()
     if isinstance(x, np.ndarray) or sp.issparse(x) or (lazy and (_is_dask(x) or _is_backed(x))):
         return x
     if _is_dask(x) or _is_backed(x):
@@ -84,6 +88,21 @@ def _params_for_uns(**params) -> dict:
         return sorted(v) if isinstance(v, set | frozenset) else list(v)
 
     return {k: writable(v) for k, v in params.items()}
+
+
+def _splice_doc[F: Callable[..., Any]](**blocks: str) -> Callable[[F], F]:
+    """Replace each line `{name}` of the docstring by the text `blocks[name]`, at the indentation of that line."""
+
+    def decorate(fn: F) -> F:
+        doc = fn.__doc__ or ""
+        for name, block in blocks.items():
+            match = re.search(rf"^( *)\{{{name}\}}$", doc, flags=re.MULTILINE)
+            assert match is not None, f"{fn.__name__} has no line {{{name}}}"
+            doc = doc.replace(match.group(0), indent(dedent(block).strip("\n"), match.group(1)))
+        fn.__doc__ = doc
+        return fn
+
+    return decorate
 
 
 def _deprecated_positional[F: Callable[..., Any]](*names: str, until: str = "0.8.0") -> Callable[[F], F]:

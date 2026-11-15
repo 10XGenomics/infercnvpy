@@ -71,7 +71,7 @@ def test_serial_twin_matches(graph_and_cnv):
     for fn, x in ((_hop_csr, (Xc.indptr, Xc.indices, Xc.data)), (_hop_dense, (X,))):
         par, ser = np.empty_like(X), np.empty_like(X)
         fn(*args, *x, par)
-        fn(*args, *x, ser, serial=True)
+        fn.serial(*args, *x, ser)
         np.testing.assert_allclose(par, ser, rtol=1e-6)
 
 

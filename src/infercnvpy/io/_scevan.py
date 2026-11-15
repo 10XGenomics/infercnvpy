@@ -96,7 +96,7 @@ def read_scevan(
     Sets the following fields:
 
     `adata.obs["{key_added}_class"]`, `adata.obs["{key_added}_confident_normal"]`
-        Only with `scevan_res_table`: tumour/normal class of each cell and whether it is a
+        Only with `scevan_res_table`: tumor/normal class of each cell and whether it is a
         confident normal cell.
     `adata.obs["{key_added}_subclone"]`
         Only with `scevan_res_table` from a run with subclone calling: the subclone of each cell.

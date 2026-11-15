@@ -1,6 +1,5 @@
 import warnings
 
-import dask
 import dask.array as da
 import numpy as np
 import pandas as pd
@@ -49,17 +48,7 @@ def _image(axes) -> np.ndarray:
 
 def _dask(X, block_rows=7):
     """A dask array with row blocks of `block_rows` (CSR blocks for sparse `X`)."""
-    if not sp.issparse(X):
-        return da.from_array(X, chunks=(block_rows, -1))
-    X = sp.csr_matrix(X)
-    meta = sp.csr_matrix((0, X.shape[1]), dtype=X.dtype)
-    blocks = [
-        da.from_delayed(
-            dask.delayed(X[s : s + block_rows]), shape=X[s : s + block_rows].shape, dtype=X.dtype, meta=meta
-        )
-        for s in range(0, X.shape[0], block_rows)
-    ]
-    return da.concatenate(blocks, axis=0)
+    return da.from_array(sp.csr_matrix(X) if sp.issparse(X) else X, chunks=(block_rows, -1), asarray=False)
 
 
 # --- data ---------------------------------------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 """Interquartile range of the cell-cell Pearson correlations within a group, without the cells x cells matrix.
 
 `np.percentile(np.corrcoef(X), [75, 25])` takes quantiles over all n^2 entries of the correlation matrix: the n
-diagonal ones and every pair twice. Here the rows are standardized once (float32, centred, unit norm), the
+diagonal ones and every pair twice. Here the rows are standardized once (float32, centered, unit norm), the
 correlations of each block of rows with all later rows come from one BLAS product, and a parallel numba kernel
 adds that block's upper triangle to thread-local histograms with weight 2. The quantiles are read off the
 cumulative counts (linear interpolation inside a bin, then numpy's linear interpolation between ranks), which
@@ -26,7 +26,7 @@ import numba
 import numpy as np
 import scipy.sparse as sp
 
-from infercnvpy._numba import _on_main_thread, njit_parallel, prange
+from infercnvpy._numba import njit_parallel, prange, runs_serially
 
 N_BINS = 1 << 20  # bin width 2 / 2^20 ~ 2e-6
 TILE = 2048  # rows per block: a block of correlations is TILE x cells float32
@@ -34,7 +34,7 @@ TILE = 2048  # rows per block: a block of correlations is TILE x cells float32
 
 @njit_parallel
 def _standardize_dense(X, out):  # pragma: no cover
-    """Centre each row and scale it to unit norm; a constant row becomes NaN. `out` may be `X`."""
+    """Center each row and scale it to unit norm; a constant row becomes NaN. `out` may be `X`."""
     n, g = X.shape
     for i in prange(n):
         m = 0.0
@@ -84,7 +84,7 @@ def _sampled_corr(Z, rows, cols, out):  # pragma: no cover
 
 
 def _quantiles(hist: np.ndarray, qs: tuple[float, ...]) -> list[float]:
-    """Numpy's default (linear) quantiles of the values summarised by `hist` over [-1, 1]."""
+    """Numpy's default (linear) quantiles of the values summarized by `hist` over [-1, 1]."""
     n_bins = len(hist)
     cum = np.cumsum(hist)
     total = int(cum[-1])
@@ -152,7 +152,7 @@ def corr_iqr(
             C = C[~np.eye(n, dtype=bool)]
         q75, q25 = np.percentile(C, [75, 25])
         return q75 - q25, n_dropped, False
-    hists = np.zeros((numba.get_num_threads() if _on_main_thread() else 1, N_BINS), dtype=np.int64)
+    hists = np.zeros((1 if runs_serially() else numba.get_num_threads(), N_BINS), dtype=np.int64)
     for r0 in range(0, n, tile):
         _bin_tile(Z[r0 : r0 + tile] @ Z[r0:].T, r0, hists)
     hist = hists.sum(axis=0)

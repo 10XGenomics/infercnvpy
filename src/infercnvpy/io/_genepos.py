@@ -74,21 +74,7 @@ def genomic_position_from_biomart(
         remedy=f"check that the gene ids in adata are {biomart_gene_id} values (see `adata_gene_id`)",
     )
 
-    tmp_var = _as_df(adata.var).copy()
-    orig_index_name = tmp_var.index.name
-    TMP_INDEX_NAME = "adata_var_index"
-    tmp_var.index.name = TMP_INDEX_NAME
-    tmp_var.reset_index(inplace=True)
-    var_annotated = tmp_var.merge(
-        biomart_annot,
-        how="left",
-        left_on=TMP_INDEX_NAME if adata_gene_id is None else adata_gene_id,
-        right_on=biomart_gene_id,
-        validate="one_to_one",
-    )
-    var_annotated.set_index(TMP_INDEX_NAME, inplace=True)
-    var_annotated.index.name = orig_index_name
-
+    var_annotated = _merge_var(adata, biomart_annot, adata_gene_id, biomart_gene_id)
     if inplace:
         adata.var = var_annotated
         return None
@@ -133,6 +119,8 @@ def genomic_position_from_gtf(
             'genomic_position_from_gtf needs the optional dependency gtfparse. Install it with `pip install "infercnvpy[gtf]"`.'
         ) from None
     gtf = gtfparse.read_gtf(gtf_file, usecols=["seqname", "feature", "start", "end", "gene_id", "gene_name"])
+    if hasattr(gtf, "to_pandas"):  # gtfparse 2 returns a polars DataFrame
+        gtf = gtf.to_pandas()
     gtf = (
         gtf.loc[
             gtf["feature"] == "gene",
@@ -157,26 +145,29 @@ def genomic_position_from_gtf(
         remedy="check `gtf_gene_id` and `adata_gene_id`, and that the GTF file matches the genome build of the data",
     )
 
+    var_annotated = _add_chr_prefix(_merge_var(adata, gtf, adata_gene_id, gtf_gene_id))
+    if inplace:
+        adata.var = var_annotated
+        return None
+    return var_annotated
+
+
+def _merge_var(adata: AnnData, annot: pd.DataFrame, adata_gene_id: str | None, annot_gene_id: str) -> pd.DataFrame:
+    """`adata.var` with the columns of `annot` whose `annot_gene_id` matches `adata_gene_id` (default: var_names)."""
     tmp_var = _as_df(adata.var).copy()
     orig_index_name = tmp_var.index.name
     TMP_INDEX_NAME = "adata_var_index"
     tmp_var.index.name = TMP_INDEX_NAME
     tmp_var.reset_index(inplace=True)
     var_annotated = tmp_var.merge(
-        gtf,
+        annot,
         how="left",
         left_on=TMP_INDEX_NAME if adata_gene_id is None else adata_gene_id,
-        right_on=gtf_gene_id,
+        right_on=annot_gene_id,
         validate="one_to_one",
     )
     var_annotated.set_index(TMP_INDEX_NAME, inplace=True)
     var_annotated.index.name = orig_index_name
-
-    var_annotated = _add_chr_prefix(var_annotated)
-
-    if inplace:
-        adata.var = var_annotated
-        return None
     return var_annotated
 
 

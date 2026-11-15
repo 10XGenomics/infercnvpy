@@ -19,23 +19,18 @@ REF = {"reference_key": "cell_type", "reference_cat": ["Microglia/Macrophage", "
 
 
 @pytest.fixture(scope="module")
-def base():
-    return cnv.datasets.oligodendroglioma()
-
-
-@pytest.fixture(scope="module")
-def expected(base):
+def expected(oligo):
     """In-memory result, with gene values."""
-    return cnv.tl.infercnv(base, **REF, calculate_gene_values=True, inplace=False)
+    return cnv.tl.infercnv(oligo, **REF, calculate_gene_values=True, inplace=False)
 
 
-def _with_X(base, X):
-    return ad.AnnData(X=X, obs=base.obs.copy(), var=base.var.copy())
+def _with_X(oligo, X):
+    return ad.AnnData(X=X, obs=oligo.obs.copy(), var=oligo.var.copy())
 
 
-def _csr_blocks(base, block_rows, counter=None):
+def _csr_blocks(oligo, block_rows, counter=None):
     """Dask array whose row blocks are CSR matrices loaded lazily, like a lazily loaded `spatialdata_io` table."""
-    X = sp.csr_matrix(base.X)
+    X = sp.csr_matrix(oligo.X)
     n, g = X.shape
 
     def load(start, stop):
@@ -68,27 +63,27 @@ def _check(adata, expected, gene_values=True, **kw):
 
 
 @pytest.mark.parametrize("block_rows", [40, 500])
-def test_dask_dense(base, expected, block_rows):
-    X = da.from_array(base.X.toarray(), chunks=(block_rows, 1000))  # also split along genes
-    _check(_with_X(base, X), expected)
+def test_dask_dense(oligo, expected, block_rows):
+    X = da.from_array(oligo.X.toarray(), chunks=(block_rows, 1000))  # also split along genes
+    _check(_with_X(oligo, X), expected)
 
 
 @pytest.mark.parametrize("block_rows", [30, 184])
-def test_dask_sparse_blocks(base, expected, block_rows):
-    _check(_with_X(base, _csr_blocks(base, block_rows)), expected)
+def test_dask_sparse_blocks(oligo, expected, block_rows):
+    _check(_with_X(oligo, _csr_blocks(oligo, block_rows)), expected)
 
 
-def test_dask_layer(base, expected):
-    a = _with_X(base, sp.csr_matrix(base.X.shape, dtype=np.float32))
-    a.layers["raw"] = _csr_blocks(base, 50)
+def test_dask_layer(oligo, expected):
+    a = _with_X(oligo, sp.csr_matrix(oligo.X.shape, dtype=np.float32))
+    a.layers["raw"] = _csr_blocks(oligo, 50)
     _check(a, expected, layer="raw")
 
 
 @pytest.mark.parametrize("fmt", ["csr", "dense"])
-def test_backed_h5ad(base, expected, tmp_path, fmt):
-    X = sp.csr_matrix(base.X) if fmt == "csr" else base.X.toarray()
+def test_backed_h5ad(oligo, expected, tmp_path, fmt):
+    X = sp.csr_matrix(oligo.X) if fmt == "csr" else oligo.X.toarray()
     path = tmp_path / "a.h5ad"
-    _with_X(base, X).write_h5ad(path)
+    _with_X(oligo, X).write_h5ad(path)
     a = ad.read_h5ad(path, backed="r")
     assert a.isbacked
     _check(a, expected, chunksize=60)
@@ -96,35 +91,57 @@ def test_backed_h5ad(base, expected, tmp_path, fmt):
     assert isinstance(a.obsm["X_cnv"], sp.csr_matrix)
 
 
+def test_backed_csc_is_read_once(oligo, expected, tmp_path, monkeypatch):
+    """A row block of a backed CSC matrix would read all of it: the matrix is read into memory once instead."""
+    import h5py
+
+    path = tmp_path / "a.h5ad"
+    _with_X(oligo, sp.csc_matrix(oligo.X)).write_h5ad(path)
+    a = ad.read_h5ad(path, backed="r")
+    read = []
+    getitem = h5py.Dataset.__getitem__
+
+    def counting(self, *args, **kwargs):
+        res = getitem(self, *args, **kwargs)
+        if self.name == "/X/data":
+            read.append(np.size(res))
+        return res
+
+    monkeypatch.setattr(h5py.Dataset, "__getitem__", counting)
+    with pytest.warns(UserWarning, match="CSC"):
+        _check(a, expected, chunksize=60)
+    assert sum(read) == a.X.group["data"].shape[0]
+
+
 @pytest.mark.parametrize("dynamic_threshold", [None, 1.5])
-def test_reads_each_block_once_per_pass(base, expected, dynamic_threshold):
+def test_reads_each_block_once_per_pass(oligo, expected, dynamic_threshold):
     """Reference means and the noise band (blocks with reference cells), and the result: one read of a block each."""
     loads = []
-    a = _with_X(base, _csr_blocks(base, 46, counter=loads))
+    a = _with_X(oligo, _csr_blocks(oligo, 46, counter=loads))
     cnv.tl.infercnv(a, **REF, dynamic_threshold=dynamic_threshold)
-    n_blocks = -(-base.n_obs // 46)
-    is_ref = base.obs["cell_type"].isin(REF["reference_cat"]).to_numpy()
-    with_ref = sum(is_ref[s : s + 46].any() for s in range(0, base.n_obs, 46))
+    n_blocks = -(-oligo.n_obs // 46)
+    is_ref = oligo.obs["cell_type"].isin(REF["reference_cat"]).to_numpy()
+    with_ref = sum(is_ref[s : s + 46].any() for s in range(0, oligo.n_obs, 46))
     assert 0 < with_ref < n_blocks
     assert len(loads) == n_blocks + with_ref * (1 if dynamic_threshold is None else 2)
     assert max(stop - start for start, stop in loads) <= 46, "more than one block was loaded at once"
 
 
-def test_streaming_reference_matches_in_memory(base):
-    lazy = _with_X(base, _csr_blocks(base, 25))
+def test_streaming_reference_matches_in_memory(oligo):
+    lazy = _with_X(oligo, _csr_blocks(oligo, 25))
     for key, cats in ((None, None), (REF["reference_key"], REF["reference_cat"])):
         with pytest.warns(UserWarning) if key is None else nullcontext():
             got = _get_reference(lazy, key, cats, None, None)
-        want = np.asarray(_get_reference(base, key, cats, None, None))
+        want = np.asarray(_get_reference(oligo, key, cats, None, None))
         np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-7)
 
 
 @pytest.mark.parametrize("scheduler", ["threads", "synchronous"])
-def test_lazy_output(base, expected, scheduler):
+def test_lazy_output(oligo, expected, scheduler):
     """With `lazy=True`, the result stays a dask array of CSR blocks and equals the eager result exactly."""
-    X = _csr_blocks(base, 50)
-    eager = cnv.tl.infercnv(_with_X(base, X), **REF, calculate_gene_values=True, inplace=False)
-    a = _with_X(base, X)
+    X = _csr_blocks(oligo, 50)
+    eager = cnv.tl.infercnv(_with_X(oligo, X), **REF, calculate_gene_values=True, inplace=False)
+    a = _with_X(oligo, X)
     with dask.config.set(scheduler=scheduler):
         cnv.tl.infercnv(a, **REF, lazy=True, calculate_gene_values=True)
         assert isinstance(a.obsm["X_cnv"], da.Array)
@@ -132,20 +149,40 @@ def test_lazy_output(base, expected, scheduler):
         res, gv = dask.compute(a.obsm["X_cnv"], a.layers["gene_values_cnv"])
     assert (sp.csr_matrix(res) != eager[1]).nnz == 0
     np.testing.assert_array_equal(gv, eager[2])
-    _check(_with_X(base, X), expected, lazy=True)
+    _check(_with_X(oligo, X), expected, lazy=True)
 
 
-def test_lazy_is_opt_in(base):
+@pytest.mark.parametrize("scheduler", ["synchronous", "processes"])
+def test_kernels_in_dask_tasks_run_serially(oligo, expected, scheduler, monkeypatch):
+    """Inside a dask task, every kernel runs its serial twin, also on the main thread (synchronous, or processes)."""
+    from infercnvpy._numba import njit_parallel
+    from infercnvpy.tl import _infercnv_kernels
+
+    parallel_calls = []
+
+    def spy(name, kernel):
+        return lambda *args: (parallel_calls.append(name), kernel.serial(*args))[1]
+
+    for name, kernel in vars(_infercnv_kernels).items():
+        if isinstance(kernel, njit_parallel):
+            monkeypatch.setattr(kernel, "parallel", spy(name, kernel))
+    a = _with_X(oligo, _csr_blocks(oligo, 50))
+    with dask.config.set(scheduler=scheduler):
+        _check(a, expected, lazy=True)
+    assert parallel_calls == []
+
+
+def test_lazy_is_opt_in(oligo):
     """Without `lazy=True`, the result of a dask array is in memory, whatever the active dask scheduler."""
-    a = _with_X(base, _csr_blocks(base, 100))
+    a = _with_X(oligo, _csr_blocks(oligo, 100))
     with dask.config.set(scheduler="threads"):
         cnv.tl.infercnv(a, **REF)
     assert isinstance(a.obsm["X_cnv"], sp.csr_matrix)
 
 
-def test_tools_that_need_cnv_in_memory(base):
+def test_tools_that_need_cnv_in_memory(oligo):
     """Tools without block-wise reading tell the user to load a lazy CNV matrix; cnv_score reads it block by block."""
-    a = _with_X(base, _csr_blocks(base, 100))
+    a = _with_X(oligo, _csr_blocks(oligo, 100))
     cnv.tl.infercnv(a, **REF, lazy=True)
     eager = a.copy()
     eager.obsm["X_cnv"] = eager.obsm["X_cnv"].compute()
@@ -164,30 +201,33 @@ def test_tools_that_need_cnv_in_memory(base):
     )
 
 
-def test_lazy_without_threshold(base, expected):
-    res = cnv.tl.infercnv(_with_X(base, _csr_blocks(base, 50)), **REF, dynamic_threshold=None, lazy=True, inplace=False)
-    want = cnv.tl.infercnv(base, **REF, dynamic_threshold=None, inplace=False)[1]
+def test_lazy_without_threshold(oligo, expected):
+    res = cnv.tl.infercnv(
+        _with_X(oligo, _csr_blocks(oligo, 50)), **REF, dynamic_threshold=None, lazy=True, inplace=False
+    )
+    want = cnv.tl.infercnv(oligo, **REF, dynamic_threshold=None, inplace=False)[1]
     np.testing.assert_allclose(res[1].compute().toarray(), want.toarray(), rtol=1e-5, atol=1e-5)
 
 
-def test_block_size_does_not_change_the_result(base):
+def test_block_size_does_not_change_the_result(oligo):
     results = [
-        cnv.tl.infercnv(_with_X(base, _csr_blocks(base, rows)), **REF, inplace=False)[1].toarray() for rows in (10, 97)
+        cnv.tl.infercnv(_with_X(oligo, _csr_blocks(oligo, rows)), **REF, inplace=False)[1].toarray()
+        for rows in (10, 97)
     ]
     np.testing.assert_allclose(results[0], results[1], rtol=1e-5, atol=1e-6)
 
 
-def test_lazily_normalised_table(base):
+def test_lazily_normalised_table(oligo):
     """A dask array of CSR blocks, normalised lazily by scanpy, gives the eager result."""
-    counts = sp.csr_matrix(base.X)
+    counts = sp.csr_matrix(oligo.X)
 
     def normalised(X):
-        a = _with_X(base, X)
+        a = _with_X(oligo, X)
         sc.pp.normalize_total(a, target_sum=1e4)
         sc.pp.log1p(a)
         return a
 
-    lazy_input = _with_X(base, counts)
+    lazy_input = _with_X(oligo, counts)
     lazy_input.X = da.from_array(counts, chunks=(40, -1), asarray=False)
     lazy = normalised(lazy_input.X)
     assert isinstance(lazy.X, da.Array)
@@ -197,21 +237,21 @@ def test_lazily_normalised_table(base):
 
 
 @pytest.fixture(scope="module")
-def zarr_store(base, tmp_path_factory):
+def zarr_store(oligo, tmp_path_factory):
     path = tmp_path_factory.mktemp("lazy") / "oligo.zarr"
-    b = base.copy()
+    b = oligo.copy()
     b.X = sp.csr_matrix(b.X)
     b.write_zarr(path)
     return path
 
 
-def test_read_elem_lazy(base, expected, zarr_store):
+def test_read_elem_lazy(oligo, expected, zarr_store):
     """`obs`/`var` in memory and `X` lazy via `read_elem_lazy`, as in the scanpy dask tutorial."""
     import zarr
     from anndata.experimental import read_elem_lazy
 
     f = zarr.open(zarr_store, mode="r")
-    X = read_elem_lazy(f["X"], chunks=(50, base.n_vars))
+    X = read_elem_lazy(f["X"], chunks=(50, oligo.n_vars))
     _check(ad.AnnData(X=X, obs=ad.io.read_elem(f["obs"]), var=ad.io.read_elem(f["var"])), expected)
 
 
@@ -223,11 +263,11 @@ def test_read_lazy(expected, zarr_store):
     assert isinstance(a.obsm["X_cnv"], sp.csr_matrix)
 
 
-def test_read_lazy_downstream(base, tmp_path):
+def test_read_lazy_downstream(oligo, tmp_path):
     """Scores and heatmaps read the groups from the lazy `obs` of `anndata.experimental.read_lazy`."""
     import matplotlib.pyplot as plt
 
-    b = base.copy()
+    b = oligo.copy()
     cnv.tl.infercnv(b, **REF)
     b.obs["cell_type"] = b.obs["cell_type"].astype("category")
     b.write_zarr(tmp_path / "cnv.zarr")
@@ -249,16 +289,16 @@ def test_read_lazy_downstream(base, tmp_path):
     np.testing.assert_array_equal(list(lazy_ith.values()), list(ith.values()))
 
 
-def test_unplaced_and_extra_features(base, expected):
+def test_unplaced_and_extra_features(oligo, expected):
     """Features without a position (e.g. control probes of a spatial panel) are skipped in lazy input too."""
     n_ctrl = 20
-    ctrl = sp.csr_matrix(np.random.default_rng(0).poisson(0.5, (base.n_obs, n_ctrl)).astype(np.float32))
-    X = sp.hstack([sp.csr_matrix(base.X), ctrl]).tocsr()
+    ctrl = sp.csr_matrix(np.random.default_rng(0).poisson(0.5, (oligo.n_obs, n_ctrl)).astype(np.float32))
+    X = sp.hstack([sp.csr_matrix(oligo.X), ctrl]).tocsr()
     var = pd.concat(
-        [base.var[["chromosome", "start", "end"]], pd.DataFrame({"chromosome": [None] * n_ctrl, "start": np.nan})]
+        [oligo.var[["chromosome", "start", "end"]], pd.DataFrame({"chromosome": [None] * n_ctrl, "start": np.nan})]
     )
-    var.index = list(base.var_names) + [f"NegControlProbe_{i}" for i in range(n_ctrl)]
-    a = ad.AnnData(X=da.from_array(X, chunks=(60, -1), asarray=False), obs=base.obs.copy(), var=var)
+    var.index = list(oligo.var_names) + [f"NegControlProbe_{i}" for i in range(n_ctrl)]
+    a = ad.AnnData(X=da.from_array(X, chunks=(60, -1), asarray=False), obs=oligo.obs.copy(), var=var)
     chr_pos, res, gv = cnv.tl.infercnv(a, **REF, calculate_gene_values=True, inplace=False)
     np.testing.assert_allclose(res.toarray(), expected[1].toarray(), rtol=1e-5, atol=1e-6)
     assert np.isnan(gv[:, -n_ctrl:]).all()

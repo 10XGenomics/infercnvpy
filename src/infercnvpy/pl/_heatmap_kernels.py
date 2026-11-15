@@ -2,12 +2,12 @@
 
 The cells are sorted by group and every group is split into contiguous runs of cells, one per pixel row
 (`pixel_rows`). A pixel row then shows either one cell of its run (`sampled_rows`: the cell in the middle, which is
-what matplotlib's nearest-neighbour downscaling shows when every cell is drawn) or the mean of the run (`binned_sums`:
+what matplotlib's nearest-neighbor downscaling shows when every cell is drawn) or the mean of the run (`binned_sums`:
 `_bin_sums_csr` / `_bin_sums_dense` add up the rows of each run straight from the matrix, CSR without densifying).
 A figure is ~1000 pixels tall, so the result is a small dense matrix whatever the number of cells.
 
-The matrix is read in row blocks (`infercnvpy.tl._infercnv._Rows`): an in-memory matrix as one block with the parallel
-kernel, a dask array block by block and a backed matrix `CHUNKSIZE` rows at a time, with the serial kernel.
+The matrix is read in row blocks (`infercnvpy.tl._infercnv._Rows`): an in-memory matrix as one block, a dask array
+block by block and a backed matrix `CHUNKSIZE` rows at a time.
 """
 
 from __future__ import annotations
@@ -78,14 +78,6 @@ def _blocks(X: Any) -> _Rows:
     return _Rows(X, max(X.shape[0], 1) if isinstance(X, np.ndarray) or sp.issparse(X) else CHUNKSIZE)
 
 
-def _each_block(source: _Rows, fn) -> None:
-    """Call `fn(X, row0, n_rows, start)` for every block of `source`, in order (backed and dask blocks read ahead)."""
-    blocks = list(range(source.n_blocks))
-    for i, (Xb, row0) in zip(blocks, source.read_ahead(blocks), strict=True):
-        s, e = int(source.bounds[i]), int(source.bounds[i + 1])
-        fn(Xb, row0, e - s, s)
-
-
 def binned_sums(X: Any, order: np.ndarray, bounds: np.ndarray) -> np.ndarray:
     """Sum of the rows of `X` in each run `order[bounds[b]:bounds[b + 1]]` (float64, runs x columns).
 
@@ -95,53 +87,42 @@ def binned_sums(X: Any, order: np.ndarray, bounds: np.ndarray) -> np.ndarray:
     sums = np.zeros((n_bins, X.shape[1]), dtype=np.float64)
     row_bin = np.full(X.shape[0], -1, dtype=np.int64)
     row_bin[order] = np.repeat(np.arange(n_bins), np.diff(bounds))
-    source = _blocks(X)
-    serial = source.kind != "in memory"
-
-    def add(Xb, row0, n, start):
-        local = np.flatnonzero(row_bin[start : start + n] >= 0)
-        b = row_bin[start + local]
+    for Xb, row0, s, e in _blocks(X).read_ahead():
+        local = np.flatnonzero(row_bin[s:e] >= 0)
+        b = row_bin[s + local]
         by_bin = np.argsort(b, kind="stable")
         bins, first = np.unique(b[by_bin], return_index=True)
         o = (row0 + local[by_bin]).astype(np.int64)
         bnd = np.append(first, len(o)).astype(np.int64)
         if sp.issparse(Xb):
-            _bin_sums_csr(Xb.indptr, Xb.indices, Xb.data, o, bnd, bins, sums, serial=serial)
+            _bin_sums_csr(Xb.indptr, Xb.indices, Xb.data, o, bnd, bins, sums)
         else:
-            _bin_sums_dense(Xb, o, bnd, bins, sums, serial=serial)
-
-    _each_block(source, add)
+            _bin_sums_dense(Xb, o, bnd, bins, sums)
     return sums
 
 
 def column_ranges(X: Any) -> tuple[np.ndarray, np.ndarray]:
     """Minimum and maximum of each column of `X` over all rows (with the zeros of a sparse matrix), NaNs ignored."""
     lo, hi = np.full(X.shape[1], np.inf), np.full(X.shape[1], -np.inf)
-
-    def update(Xb, row0, n, start):
-        rows = Xb[row0 : row0 + n]
+    for Xb, row0, s, e in _blocks(X).read_ahead():
+        rows = Xb[row0 : row0 + e - s]
         if sp.issparse(rows):
             b_lo, b_hi = rows.nanmin(axis=0).toarray().ravel(), rows.nanmax(axis=0).toarray().ravel()
         else:
             b_lo, b_hi = np.fmin.reduce(rows, axis=0), np.fmax.reduce(rows, axis=0)
         np.fmin(lo, b_lo, out=lo)
         np.fmax(hi, b_hi, out=hi)
-
-    _each_block(_blocks(X), update)
     return lo, hi
 
 
 def gram(X: Any) -> tuple[np.ndarray, np.ndarray]:
     """`X.T @ X` and the column sums of `X`, in float64, `CHUNKSIZE` rows at a time."""
     G, sums = np.zeros((X.shape[1], X.shape[1])), np.zeros(X.shape[1])
-
-    def add(Xb, row0, n, start):
-        for s in range(row0, row0 + n, CHUNKSIZE):
-            rows = Xb[s : min(s + CHUNKSIZE, row0 + n)].astype(np.float64)
-            G[:] += (rows.T @ rows).toarray() if sp.issparse(rows) else rows.T @ rows
-            sums[:] += np.asarray(rows.sum(axis=0)).ravel()
-
-    _each_block(_blocks(X), add)
+    for Xb, row0, s, e in _blocks(X).read_ahead():
+        for r in range(row0, row0 + e - s, CHUNKSIZE):
+            rows = Xb[r : min(r + CHUNKSIZE, row0 + e - s)].astype(np.float64)
+            G += (rows.T @ rows).toarray() if sp.issparse(rows) else rows.T @ rows
+            sums += np.asarray(rows.sum(axis=0)).ravel()
     return G, sums
 
 
@@ -153,18 +134,14 @@ def sampled_rows(X: Any, picks: np.ndarray) -> tuple[np.ndarray, float, float]:
     out = np.empty((len(picks), X.shape[1]), dtype=np.float64)
     sorted_picks = np.argsort(picks, kind="stable")
     ranges = []
-
-    def take(Xb, row0, n, start):
-        values = Xb.data if sp.issparse(Xb) else Xb[row0 : row0 + n]
+    for Xb, row0, s, e in _blocks(X).read_ahead():
+        values = Xb.data if sp.issparse(Xb) else Xb[row0 : row0 + e - s]
         if values.size:
             ranges.append((np.nanmin(values), np.nanmax(values)))
-        lo, hi = np.searchsorted(picks[sorted_picks], [start, start + n])
+        lo, hi = np.searchsorted(picks[sorted_picks], [s, e])
         dest = sorted_picks[lo:hi]
-        rows = Xb[row0 + picks[dest] - start]
+        rows = Xb[row0 + picks[dest] - s]
         out[dest] = rows.toarray() if sp.issparse(rows) else rows
-
-    source = _blocks(X)
-    _each_block(source, take)
     if not ranges:
         return out, np.nan, np.nan
     return out, float(min(r[0] for r in ranges)), float(max(r[1] for r in ranges))

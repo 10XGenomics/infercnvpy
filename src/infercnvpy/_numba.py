@@ -1,10 +1,12 @@
 """numba helpers: a parallel kernel with a serial twin, and `n_jobs` as the number of numba threads.
 
-A ``parallel=True`` kernel only runs on the main thread. Called from any other thread (a dask worker, a thread pool),
-the serial twin runs instead: numba's default ``workqueue`` threading layer (the only one in the macOS wheels) aborts
-the process on concurrent use, and a caller that brings its own threads should not get numba threads on top.
+A ``parallel=True`` kernel only runs on the main thread and outside dask tasks (`dask_task`). Anywhere else (a dask
+worker, a thread pool, the main thread of a dask worker process) the serial twin runs instead: numba's default
+``workqueue`` threading layer (the only one in the macOS wheels) aborts the process on concurrent use, and a caller
+that brings its own threads or processes should not get numba threads on top.
 
-All kernels use numba's disk cache, with data files named after their cache key (see `_KeyedCacheFile`).
+All kernels use numba's disk cache, with data files named after their cache key (see `_KeyedCacheFile`), and numpy's
+error model, so that both twins divide by zero alike.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import threading
 from contextlib import contextmanager
-from functools import update_wrapper
+from functools import update_wrapper, wraps
 from types import FunctionType
 from typing import TYPE_CHECKING, Any
 
@@ -25,7 +27,7 @@ if TYPE_CHECKING:
 else:
     from numba import prange
 
-__all__ = ["n_kernel_chunks", "njit", "njit_parallel", "numba_threads", "prange"]
+__all__ = ["dask_task", "n_kernel_chunks", "njit", "njit_parallel", "numba_threads", "prange", "runs_serially"]
 
 
 class _KeyedCacheFile(IndexDataCacheFile):
@@ -58,18 +60,18 @@ class _KeyedFunctionCache(FunctionCache):
 
 
 def njit(fn: Callable[..., Any], /, **options: Any) -> Any:
-    """`numba.njit` with ``nogil=True`` and the disk cache of `_KeyedCacheFile`."""
-    dispatcher = numba.njit(fn, nogil=True, **options)
-    dispatcher._cache = _KeyedFunctionCache(dispatcher.py_func)  # type: ignore[attr-defined]  # what `cache=True` sets
+    """`numba.njit` with ``nogil=True``, numpy's error model and the disk cache of `_KeyedCacheFile`."""
+    dispatcher = numba.njit(fn, nogil=True, error_model="numpy", **options)
+    if hasattr(dispatcher, "py_func"):  # with NUMBA_DISABLE_JIT=1, `njit` returns `fn` itself
+        dispatcher._cache = _KeyedFunctionCache(dispatcher.py_func)  # type: ignore[attr-defined]  # what `cache=True` sets
     return dispatcher
 
 
 class njit_parallel:
     """Compile a function with `njit` twice, ``parallel=True`` and serial.
 
-    Calling it runs the parallel version on the main thread and the serial one on any other thread, or always the
-    serial one with ``serial=True`` (for code that runs inside dask tasks). The two versions are distinct function
-    objects with distinct names, so they don't share a cache entry.
+    Calling it runs the serial version where `runs_serially` says so, otherwise the parallel one. The two versions are
+    distinct function objects with distinct names, so they don't share a cache entry.
     """
 
     def __init__(self, fn: Callable[..., Any], /):
@@ -78,12 +80,31 @@ class njit_parallel:
         self.serial = njit(_renamed(fn, "serial"))
         update_wrapper(self, fn)
 
-    def __call__(self, *args, serial: bool = False):
-        return (self.serial if serial or not _on_main_thread() else self.parallel)(*args)
+    def __call__(self, *args):
+        return (self.serial if runs_serially() else self.parallel)(*args)
 
 
-def _on_main_thread() -> bool:
-    return threading.current_thread() is threading.main_thread()
+_scope = threading.local()
+
+
+def runs_serially() -> bool:
+    """Whether kernels called here run serially: off the main thread, or inside a dask task (see `dask_task`)."""
+    return threading.current_thread() is not threading.main_thread() or getattr(_scope, "in_dask_task", False)
+
+
+def dask_task[F: Callable[..., Any]](fn: F) -> F:
+    """Mark `fn` as a dask task: the kernels it calls run serially, whatever thread or process the scheduler uses."""
+
+    @wraps(fn)
+    def task(*args, **kwargs):
+        outer = getattr(_scope, "in_dask_task", False)
+        _scope.in_dask_task = True
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _scope.in_dask_task = outer
+
+    return task  # type: ignore[return-value]
 
 
 def _renamed(fn: FunctionType, suffix: str) -> FunctionType:
@@ -93,9 +114,9 @@ def _renamed(fn: FunctionType, suffix: str) -> FunctionType:
     return new
 
 
-def n_kernel_chunks(n_rows: int, *, serial: bool = False, per_thread: int = 4) -> int:
+def n_kernel_chunks(n_rows: int, *, per_thread: int = 4) -> int:
     """Number of row chunks for a `prange` kernel: `per_thread` per numba thread, or 1 if it runs serially."""
-    if serial or not _on_main_thread():
+    if runs_serially():
         return 1
     return max(1, min(n_rows, per_thread * numba.get_num_threads()))
 

@@ -2,6 +2,7 @@ import logging
 
 import dask.array as da
 import numpy as np
+import pandas as pd
 import pytest
 import scipy.sparse as sp
 
@@ -113,6 +114,24 @@ def test_ithcna_use_rep_full_key_is_deprecated(adata_ithgex):
     expected = cnv.tl.ithcna(adata_ithgex, groupby="group", use_rep="cnv", inplace=False)
     with pytest.warns(FutureWarning, match="use_rep='cnv'"):
         assert cnv.tl.ithcna(adata_ithgex, groupby="group", use_rep="X_cnv", inplace=False) == expected
+
+
+def test_ithcna_use_rep_any_obsm_key_is_deprecated(adata_ithgex):
+    """As in 0.6, `use_rep` can still name an obsm key without the `X_` prefix."""
+    expected = cnv.tl.ithcna(adata_ithgex, groupby="group", inplace=False)
+    adata_ithgex.obsm["custom"] = adata_ithgex.obsm["X_cnv"]
+    with pytest.warns(FutureWarning, match="use_rep='custom'"):
+        assert cnv.tl.ithcna(adata_ithgex, groupby="group", use_rep="custom", inplace=False) == expected
+
+
+def test_dataframe_cnv_matrix(adata_ithgex):
+    """A CNV matrix stored as a DataFrame in obsm (as 0.6 accepted) works as its values."""
+    funcs = (cnv.tl.ithcna, cnv.tl.cnv_score)
+    expected = [f(adata_ithgex, groupby="group", inplace=False) for f in funcs]
+    X = adata_ithgex.obsm["X_cnv"]
+    adata_ithgex.obsm["X_cnv"] = pd.DataFrame(X.toarray() if sp.issparse(X) else X, index=adata_ithgex.obs_names)
+    for f, want in zip(funcs, expected, strict=True):
+        assert f(adata_ithgex, groupby="group", inplace=False) == pytest.approx(want)
 
 
 @pytest.mark.parametrize("func", [cnv.tl.cnv_score, cnv.tl.ithgex, cnv.tl.ithcna])

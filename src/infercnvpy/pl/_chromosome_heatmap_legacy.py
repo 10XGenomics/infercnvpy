@@ -29,43 +29,22 @@ def legacy_heatmap(
     """Every cell as a row of :func:`scanpy.pl.heatmap`, in the original order within each group."""
     X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`adata.obsm['X_{use_rep}']`")
     obs = _as_df(adata.obs)
-    # an actual AnnData (not a view) that shares `uns`, so the colours scanpy picks are stored in `adata.uns`
+    # an actual AnnData (not a view) that shares `uns`, so the colors scanpy picks are stored in `adata.uns`
     order = _stable_group_order(AnnData(X=X, obs=obs, uns=adata.uns), groupby, kwargs.get("dendrogram", False))
     tmp_adata = AnnData(X=X[order], obs=obs.iloc[order], uns=adata.uns)
-
-    # re-sort, as saving & loading anndata destroys the order
-    chr_pos_dict = dict(sorted(adata.uns[use_rep]["chr_pos"].items(), key=lambda x: x[1]))
-    chr_pos = list(chr_pos_dict.values())
-
-    # center color map at 0
-    tmp_data = X if isinstance(X, np.ndarray) else X.data
-    vmin = kwargs.pop("vmin", None)
-    vmax = kwargs.pop("vmax", None)
-    if vmin is None:
-        vmin = np.nanmin(tmp_data)
-    if vmax is None:
-        vmax = np.nanmax(tmp_data)
-    kwargs["norm"] = TwoSlopeNorm(0, vmin=vmin, vmax=vmax)
-
-    # add chromosome annotations
-    var_group_positions = list(zip(chr_pos, chr_pos[1:] + [tmp_adata.shape[1]], strict=False))
-
-    return_ax_dic = sc.pl.heatmap(
+    values = X if isinstance(X, np.ndarray) else X.data
+    return _scanpy_heatmap(
         tmp_adata,
-        var_names=tmp_adata.var.index.values,
+        adata,
+        use_rep,
+        np.nanmin(values),
+        np.nanmax(values),
+        0,
         groupby=groupby,
-        figsize=figsize,
         cmap=cmap,
-        show_gene_labels=False,
-        var_group_positions=var_group_positions,
-        var_group_labels=list(chr_pos_dict.keys()),
-        show=False,
-        save=False,
+        figsize=figsize,
         **kwargs,
     )
-
-    return_ax_dic["heatmap_ax"].vlines(chr_pos[1:], lw=0.6, ymin=0, ymax=tmp_adata.shape[0])
-    return return_ax_dic
 
 
 def _stable_group_order(adata: AnnData, groupby: str, dendrogram: bool | str) -> np.ndarray:
@@ -118,21 +97,42 @@ def legacy_summary(
         X=np.vstack([np.repeat(_get_group_mean(group), 10, axis=0) for group in groups]), obs=tmp_obs, uns=adata.uns
     )
 
+    return _scanpy_heatmap(
+        tmp_adata,
+        adata,
+        use_rep,
+        np.min(tmp_adata.X),
+        np.max(tmp_adata.X),
+        -1,
+        groupby=groupby,
+        cmap=cmap,
+        figsize=figsize,
+        **kwargs,
+    )
+
+
+def _scanpy_heatmap(
+    tmp_adata: AnnData,
+    adata: AnnData,
+    use_rep: str,
+    lo: float,
+    hi: float,
+    ymin: float,
+    *,
+    groupby: str,
+    cmap: str | Colormap,
+    figsize: tuple[float, float],
+    **kwargs,
+) -> dict[str, Axes]:
+    """Draw `tmp_adata` with :func:`scanpy.pl.heatmap`, with chromosome annotations.
+
+    The color scale is centered at 0, from `vmin` to `vmax` (default `lo` and `hi`).
+    """
+    # re-sort, as saving & loading anndata destroys the order
     chr_pos_dict = dict(sorted(adata.uns[use_rep]["chr_pos"].items(), key=lambda x: x[1]))
     chr_pos = list(chr_pos_dict.values())
-
-    # center color map at 0
-    vmin = kwargs.pop("vmin", None)
-    vmax = kwargs.pop("vmax", None)
-    if vmin is None:
-        vmin = np.min(tmp_adata.X)
-    if vmax is None:
-        vmax = np.max(tmp_adata.X)
-    kwargs["norm"] = TwoSlopeNorm(0, vmin=vmin, vmax=vmax)
-
-    # add chromosome annotations
-    var_group_positions = list(zip(chr_pos, chr_pos[1:] + [tmp_adata.shape[1]], strict=False))
-
+    vmin, vmax = kwargs.pop("vmin", None), kwargs.pop("vmax", None)
+    kwargs["norm"] = TwoSlopeNorm(0, vmin=lo if vmin is None else vmin, vmax=hi if vmax is None else vmax)
     return_ax_dic = sc.pl.heatmap(
         tmp_adata,
         var_names=tmp_adata.var.index.values,
@@ -140,12 +140,11 @@ def legacy_summary(
         figsize=figsize,
         cmap=cmap,
         show_gene_labels=False,
-        var_group_positions=var_group_positions,
+        var_group_positions=list(zip(chr_pos, chr_pos[1:] + [tmp_adata.shape[1]], strict=False)),
         var_group_labels=list(chr_pos_dict.keys()),
         show=False,
         save=False,
         **kwargs,
     )
-
-    return_ax_dic["heatmap_ax"].vlines(chr_pos[1:], lw=0.6, ymin=-1, ymax=tmp_adata.shape[0])
+    return_ax_dic["heatmap_ax"].vlines(chr_pos[1:], lw=0.6, ymin=ymin, ymax=tmp_adata.shape[0])
     return return_ax_dic

@@ -14,7 +14,7 @@ from anndata import AnnData
 from numpy.lib.stride_tricks import sliding_window_view
 
 from infercnvpy._logging import SKIP_OWN_FRAMES, log, log_result
-from infercnvpy._numba import n_kernel_chunks, numba_threads
+from infercnvpy._numba import dask_task, n_kernel_chunks, numba_threads
 from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column, _params_for_uns
 from infercnvpy.tl._infercnv_kernels import (
     _cnv_csr,
@@ -22,8 +22,6 @@ from infercnvpy.tl._infercnv_kernels import (
     _count_kept,
     _fill_kept,
     _gene_values,
-    _group_expm1_sums_csr,
-    _group_expm1_sums_dense,
     _group_sums_csr,
     _group_sums_dense,
     _n_unsorted_rows,
@@ -144,14 +142,14 @@ def infercnv(
         are NaN. This needs a dense float32 cells x genes matrix in memory.
     min_mean
         Leave out genes whose mean expression over all cells is below this value, before the
-        windows are formed. The mean is taken of `expm1` of the input, i.e. of the normalised
-        counts behind the log-normalised values (see :ref:`input-data`), not of the log values.
+        windows are formed. The mean is taken of `expm1` of the input, i.e. of the normalized
+        counts behind the log-normalized values (see :ref:`input-data`), not of the log values.
         This follows the `cutoff` of R inferCNV, which removes genes by their mean read count
         and suggests `1` for Smart-seq2 and `0.1` for 10x data. R applies its cutoff to the raw
-        counts before normalisation; the means here are on the scale of
+        counts before normalization; the means here are on the scale of
         :func:`scanpy.pp.normalize_total`, which are on the scale of the raw counts when the data
-        is normalised to the median total count (scanpy's default `target_sum=None`, as R
-        inferCNV normalises). Default: keep all genes.
+        is normalized to the median total count (scanpy's default `target_sum=None`, as R
+        inferCNV normalizes). Default: keep all genes.
 
     Returns
     -------
@@ -369,7 +367,6 @@ class _Layout:
         self.n_windows = n_windows
         g0s, gs, As, Bs, Ks, w0s = (np.array(x, dtype=np.int64) for x in zip(*geometry, strict=True))
         self.geometry = (g0s, gs, As, Bs, Ks, w0s, step)
-        self.step = step
         first, n_in, offset, length, ab = (np.concatenate(x).astype(np.int64) for x in zip(*scatter, strict=True))
         #: largest number of windows that contain one gene
         self.span = int(n_in.max())
@@ -419,9 +416,9 @@ class _Plan:
 
 
 def _windows(
-    plan: _Plan, X, rows: np.ndarray, band=None, *, out: bool = True, serial: bool = False
+    plan: _Plan, X, rows: np.ndarray, band=None, *, out: bool = True
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Median-centred windows (float32) of the rows `rows` of `X`, their (sum, sum of squares), and their counts.
+    """Median-centered windows (float32) of the rows `rows` of `X`, their (sum, sum of squares), and their counts.
 
     The counts are the numbers of values outside the noise `band`, all 0 without a band. With `out=False`, the windows
     are not kept (the first array has no rows).
@@ -432,15 +429,15 @@ def _windows(
     rowstats = np.empty((n_rows, 2), dtype=np.float64)
     counts = np.empty(n_rows, dtype=np.int64)
     thr, centre = (np.inf, 0.0) if band is None else band
-    n_chunks = n_kernel_chunks(n_rows, serial=serial)
+    n_chunks = n_kernel_chunks(n_rows)
     shared = (
         rows, lay.col_map, plan.lo, plan.hi, plan.base, plan.cap, *lay.geometry, *lay.scatter, lay.window_weight,
         plan.base_sums, plan.max_nnz, thr, centre, windows, rowstats, counts, n_chunks,
     )  # fmt: skip
     if sp.issparse(X):
-        _cnv_csr(X.data, X.indices, X.indptr, *shared, serial=serial)
+        _cnv_csr(X.data, X.indices, X.indptr, *shared)
     else:
-        _cnv_dense(X, *shared, serial=serial)
+        _cnv_dense(X, *shared)
     if np.isnan(rowstats[:, 0]).any():
         raise ValueError("infercnv needs finite values, but the expression matrix or the reference contains NaN.")
     return windows, rowstats, counts
@@ -491,7 +488,7 @@ class _CsrBuilder:
             self.indices = np.empty(0, dtype=idx_dtype)
         self.n = 0
 
-    def add(self, windows: np.ndarray, counts: np.ndarray, band: tuple[float, float], serial: bool = False):
+    def add(self, windows: np.ndarray, counts: np.ndarray, band: tuple[float, float]):
         """Append the rows `windows`, with `counts` values outside the noise `band` per row."""
         r0, r1 = self.n, self.n + len(windows)
         indptr = self.indptr[r0 : r1 + 1]
@@ -502,7 +499,7 @@ class _CsrBuilder:
             size = max(nnz, int(nnz / r1 * self.shape[0] * 1.05), self.data.size * 5 // 4)
             self.data.resize(size, refcheck=False)
             self.indices.resize(size, refcheck=False)
-        _fill_kept(windows, *band, indptr, self.data, self.indices, serial=serial)
+        _fill_kept(windows, *band, indptr, self.data, self.indices)
         self.n = r1
 
     def finish(self) -> sp.csr_matrix:
@@ -514,17 +511,19 @@ class _CsrBuilder:
         return sp.csr_matrix((self.data, indices, self.indptr.astype(idx_dtype)), shape=self.shape, copy=False)
 
 
-def _to_csr(windows: np.ndarray, counts: np.ndarray, band: tuple[float, float], serial: bool = False) -> sp.csr_matrix:
+def _to_csr(windows: np.ndarray, counts: np.ndarray, band: tuple[float, float]) -> sp.csr_matrix:
     """The entries of `windows` outside the noise band (`counts` per row) as a CSR matrix."""
     builder = _CsrBuilder(*windows.shape)
-    builder.add(windows, counts, band, serial=serial)
+    builder.add(windows, counts, band)
     return builder.finish()
 
 
-def _gene_values_of(plan: _Plan, out: np.ndarray, band: tuple[float, float], serial: bool = False) -> np.ndarray:
-    gv = np.full((out.shape[0], plan.layout.n_vars), np.nan, dtype=np.float32)
-    n_chunks = n_kernel_chunks(out.shape[0], serial=serial)
-    _gene_values(out, *plan.layout.gene_geometry, *band, gv, n_chunks, serial=serial)
+def _gene_values_of(plan: _Plan, out: np.ndarray, band: tuple[float, float], gv: np.ndarray | None = None):
+    """Gene values of the centered windows `out` into `gv` (NaN-filled; default: a new array), see `_gene_values`."""
+    if gv is None:
+        gv = np.full((out.shape[0], plan.layout.n_vars), np.nan, dtype=np.float32)
+    n_chunks = n_kernel_chunks(out.shape[0])
+    _gene_values(out, *plan.layout.gene_geometry, *band, gv, n_chunks)
     return gv
 
 
@@ -552,14 +551,14 @@ def _run(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_values
             band = _noise_band(plan, rowstats if band_rows is None else rowstats[band_rows])
             _count_kept(windows, *band, counts)
         if gv is not None:
-            gv[builder.n : builder.n + len(rows)] = _gene_values_of(plan, windows, band)
+            _gene_values_of(plan, windows, band, gv[builder.n : builder.n + len(rows)])
         builder.add(windows, counts, band)
     assert band is not None
     return builder.finish(), gv, band
 
 
 def _run_lazy(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_values: bool):
-    """The CNV matrix (and gene values) as lazy dask arrays; the serial kernels run inside dask tasks.
+    """The CNV matrix (and gene values) as lazy dask arrays; the kernels run serially inside the dask tasks.
 
     The noise band is computed first, by one dask computation over the blocks that hold `band_rows` (or all blocks).
     """
@@ -589,20 +588,23 @@ def _run_lazy(plan: _Plan, source: "_Rows", band_rows: np.ndarray | None, gene_v
     return res, gv, band
 
 
+@dask_task
 def _dask_stats_task(block, plan: _Plan, local: np.ndarray | None) -> np.ndarray:
     X = _kernel_ready(block)
-    return _windows(plan, X, np.arange(X.shape[0]) if local is None else local, out=False, serial=True)[1]
+    return _windows(plan, X, np.arange(X.shape[0]) if local is None else local, out=False)[1]
 
 
+@dask_task
 def _lazy_cnv_block(plan: _Plan, band, block) -> sp.csr_matrix:
     X = _kernel_ready(block)
-    windows, _, counts = _windows(plan, X, np.arange(X.shape[0]), band, serial=True)
-    return _to_csr(windows, counts, band, serial=True)
+    windows, _, counts = _windows(plan, X, np.arange(X.shape[0]), band)
+    return _to_csr(windows, counts, band)
 
 
+@dask_task
 def _lazy_gene_values_block(plan: _Plan, band, block) -> np.ndarray:
     X = _kernel_ready(block)
-    return _gene_values_of(plan, _windows(plan, X, np.arange(X.shape[0]), serial=True)[0], band, serial=True)
+    return _gene_values_of(plan, _windows(plan, X, np.arange(X.shape[0]))[0], band)
 
 
 class _Rows:
@@ -610,7 +612,7 @@ class _Rows:
 
     In memory and backed, blocks have `chunksize` rows; a dask array keeps its own blocks. `rows_of` reads the blocks
     ahead in threads (dask: with the synchronous scheduler) and yields them on this thread, so the kernels can use all
-    numba threads.
+    numba threads. A backed CSC matrix is read into memory as CSR first: each row block of it would read all of it.
     """
 
     def __init__(self, X, chunksize: int):
@@ -621,6 +623,15 @@ class _Rows:
                 X = X.rechunk({1: -1})
             sizes = list(X.chunks[0])
         else:
+            if _is_backed(X) and getattr(X, "format", None) == "csc":
+                warnings.warn(
+                    "The backed matrix is stored as CSC, so reading a block of its rows reads all of it. infercnvpy "
+                    "reads it into memory once, as CSR. To read it block by block, store it as CSR, e.g. with "
+                    "`adata.X = adata.X.tocsr()` before `adata.write_h5ad`.",
+                    UserWarning,
+                    skip_file_prefixes=SKIP_OWN_FRAMES,
+                )
+                X = X.to_memory()
             self.kind = "backed" if _is_backed(X) else "in memory"
             if self.kind == "in memory":
                 X = _kernel_ready(X)
@@ -649,12 +660,15 @@ class _Rows:
         `X` is an in-memory, kernel-ready matrix that holds the block.
         """
         blocks = list(self.blocks_of(rows))
-        for (i, local), (X, row0) in zip(blocks, self.read_ahead([i for i, _ in blocks]), strict=True):
-            s, e = int(self.bounds[i]), int(self.bounds[i + 1])
+        for (_, local), (X, row0, s, e) in zip(blocks, self.read_ahead([i for i, _ in blocks]), strict=True):
             yield X, row0 + (np.arange(e - s) if local is None else local)
 
-    def read_ahead(self, blocks: list[int]) -> Iterator[tuple[Any, int]]:
-        """`read` of each of `blocks`. Backed and dask blocks are read ahead in threads while earlier ones are used."""
+    def read_ahead(self, blocks: Sequence[int] | None = None) -> Iterator[tuple[Any, int, int, int]]:
+        """`read` of each of `blocks` (default: all), in order.
+
+        Backed and dask blocks are read ahead in threads while earlier ones are used.
+        """
+        blocks = range(self.n_blocks) if blocks is None else blocks
         if self.kind == "in memory" or len(blocks) < 2:
             yield from map(self.read, blocks)
             return
@@ -668,13 +682,13 @@ class _Rows:
             while ahead:
                 yield ahead.popleft().result()
 
-    def read(self, i: int) -> tuple[Any, int]:
-        """Block `i` as an in-memory, kernel-ready matrix, and the row of that matrix where the block starts."""
+    def read(self, i: int) -> tuple[Any, int, int, int]:
+        """`(X, row0, s, e)`: rows `s:e`, block `i`, are the rows from `row0` on of `X` (in memory, kernel-ready)."""
         s, e = int(self.bounds[i]), int(self.bounds[i + 1])
         if self.kind == "in memory":
-            return self.X, s
+            return self.X, s, s, e
         block = self.X.blocks[i].compute(scheduler="synchronous") if self.kind == "dask" else self.X[s:e]
-        return _kernel_ready(block), 0
+        return _kernel_ready(block), 0, s, e
 
 
 def _kernel_ready(X):
@@ -781,7 +795,7 @@ def _means(source: _Rows, codes: np.ndarray, n_groups: int, *, lazy: bool, expm1
         sums = np.sum(dask.compute(*tasks), axis=0)
     else:
         sums = np.zeros((n_groups, source.X.shape[1]))
-        for (i, local), (X, row0) in zip(blocks, source.read_ahead([i for i, _ in blocks]), strict=True):
+        for (i, local), (X, row0, _, _) in zip(blocks, source.read_ahead([i for i, _ in blocks]), strict=True):
             local, groups = _block_groups(source, i, local, codes)
             sums += _group_sums(X, row0 + local, groups, n_groups, expm1=expm1)
     counts = np.bincount(codes[codes >= 0], minlength=n_groups)
@@ -796,6 +810,7 @@ def _block_groups(source: _Rows, i: int, local: np.ndarray | None, codes: np.nda
     return local, codes[s + local]
 
 
+@dask_task
 def _dask_block_sums(block, local: np.ndarray, groups: np.ndarray, n_groups: int, expm1: bool = False) -> np.ndarray:
     return _group_sums(_kernel_ready(block), local, groups, n_groups, expm1=expm1)
 
@@ -807,7 +822,7 @@ def _group_sums(X, rows: np.ndarray, groups: np.ndarray, n_groups: int, *, expm1
     """
     sums = np.zeros((n_kernel_chunks(len(rows), per_thread=1), n_groups, X.shape[1]))
     if sp.issparse(X):
-        (_group_expm1_sums_csr if expm1 else _group_sums_csr)(X.data, X.indices, X.indptr, rows, groups, sums)
+        _group_sums_csr(X.data, X.indices, X.indptr, rows, groups, expm1, sums)
     else:
-        (_group_expm1_sums_dense if expm1 else _group_sums_dense)(X, rows, groups, sums)
+        _group_sums_dense(X, rows, groups, expm1, sums)
     return sums.sum(axis=0)

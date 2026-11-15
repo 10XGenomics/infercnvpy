@@ -50,8 +50,8 @@ def spatial_cnv(
     """Plot the mean CNV of genomic regions, or columns of `adata.obs`, on the tissue.
 
     Thin wrapper around :func:`scanpy.pl.embedding` with `basis="spatial"`. Each region
-    becomes a panel coloured by the mean of `adata.obsm["X_{use_rep}"]` over its windows,
-    with a diverging colour map centred at 0 (pass `vcenter=None` to turn that off).
+    becomes a panel colored by the mean of `adata.obsm["X_{use_rep}"]` over its windows,
+    with a diverging color map centered at 0 (pass `vcenter=None` to turn that off).
     As :func:`scanpy.pl.spatial` without an image, the panels have an equal aspect and the
     y axis points down. `adata.obsm["X_{use_rep}"]` must be in memory.
 
@@ -72,7 +72,7 @@ def spatial_cnv(
     basis
         Key of the coordinates in `adata.obsm` (`"spatial"` refers to `obsm["spatial"]`).
     cmap
-        Colour map of the regions (and other continuous panels).
+        Color map of the regions (and other continuous panels).
     **kwargs
         Passed to :func:`scanpy.pl.embedding`, e.g. `size`, `ncols`, `vmin`/`vmax`, `show`,
         `save` (a string is appended to the file name `basis`) or `return_fig`.

@@ -61,6 +61,12 @@ def _oligodendroglioma() -> AnnData:
     return cnv.datasets.oligodendroglioma()
 
 
+@pytest.fixture(scope="session")
+def oligo(_oligodendroglioma) -> AnnData:
+    """The oligodendroglioma dataset, for tests that leave it as it is."""
+    return _oligodendroglioma
+
+
 @pytest.fixture
 def adata_oligodendroglioma(_oligodendroglioma) -> AnnData:
     """A fresh copy of the oligodendroglioma dataset with raw counts in .X (csr)."""

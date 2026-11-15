@@ -1,11 +1,11 @@
-"""Spatial tools: smooth a CNV matrix over a spatial neighbour graph, and regularise labels with a Potts prior.
+"""Spatial tools: smooth a CNV matrix over a spatial neighbor graph, and regularize labels with a Potts prior.
 
 Both read the graph from `adata.obsp`, e.g. `obsp["spatial_connectivities"]` from :func:`squidpy.gr.spatial_neighbors_knn`;
 infercnvpy itself does not depend on squidpy.
 
 `_hop_csr` / `_hop_dense` compute one smoothing step ``out = S @ X`` with ``S = diag(a) + diag((1 - a) / d) @ A``
 (`A` the graph without its diagonal, `d` its row sums, `a` the self weight per cell) without forming `S`: the row
-normalisation and the self weight are applied on the fly while each output row gathers its neighbours' rows, so a
+normalization and the self weight are applied on the fly while each output row gathers its neighbors' rows, so a
 CSR input is read in place and never densified. `_icm` runs sequential iterated conditional modes sweeps.
 """
 
@@ -25,14 +25,14 @@ from infercnvpy._util import _as_matrix, _obs_column, _params_for_uns
 
 @njit
 def _row_weights(g_indptr, g_indices, g_data, i, alpha):
-    """Self weight `a` and neighbour scale `(1 - a) / d` of cell `i` (diagonal entries of the graph are ignored)."""
+    """Self weight `a` and neighbor scale `(1 - a) / d` of cell `i` (diagonal entries of the graph are ignored)."""
     d = 0.0
     deg = 0
     for e in range(g_indptr[i], g_indptr[i + 1]):
         if g_indices[e] != i:
             d += g_data[e]
             deg += 1
-    if d <= 0:  # no neighbours: keep the cell's own values
+    if d <= 0:  # no neighbors: keep the cell's own values
         return 1.0, 0.0
     a = alpha if alpha >= 0 else 1.0 / (deg + 1)
     return a, (1.0 - a) / d
@@ -74,7 +74,7 @@ def _hop_dense(g_indptr, g_indices, g_data, alpha, X, out):  # pragma: no cover
 
 @njit
 def _icm(indptr, indices, weights, unary, labels, beta, n_iter):  # pragma: no cover
-    """Iterated conditional modes for a Potts model, in place on `labels` (-1 = unlabelled).
+    """Iterated conditional modes for a Potts model, in place on `labels` (-1 = unlabeled).
 
     Returns the sweeps run and whether the last one changed no label.
 
@@ -95,7 +95,7 @@ def _icm(indptr, indices, weights, unary, labels, beta, n_iter):  # pragma: no c
             for p in range(indptr[i], indptr[i + 1]):
                 lab = labels[indices[p]]
                 if lab >= 0 and indices[p] != i:
-                    # penalty beta * w for every class but the neighbour's, up to a constant per cell
+                    # penalty beta * w for every class but the neighbor's, up to a constant per cell
                     e[lab] -= beta * weights[p]
                     informative = True
             current = labels[i]
@@ -117,7 +117,7 @@ def _graph(adata: AnnData, connectivity_key: str) -> sp.csr_matrix:
     if connectivity_key == "distances" or connectivity_key.endswith("_distances"):
         raise ValueError(
             f"`connectivity_key={connectivity_key!r}` looks like a distance matrix. The graph weights must be "
-            "similarities or binary connectivities, where a larger weight means a closer neighbour, e.g. "
+            "similarities or binary connectivities, where a larger weight means a closer neighbor, e.g. "
             f"{connectivity_key.removesuffix('distances') + 'connectivities'!r}."
         )
     if connectivity_key not in adata.obsp:
@@ -144,10 +144,10 @@ def smooth_cnv(
     inplace: bool = True,
     n_jobs: int | None = None,
 ) -> np.ndarray | None:
-    r"""Smooth a CNV matrix over a spatial neighbour graph.
+    r"""Smooth a CNV matrix over a spatial neighbor graph.
 
     Each cell's CNV profile is replaced by a weighted mean of its own profile and those of its
-    neighbours in the graph `adata.obsp[connectivity_key]`. One step is
+    neighbors in the graph `adata.obsp[connectivity_key]`. One step is
 
     .. math::
 
@@ -155,28 +155,28 @@ def smooth_cnv(
 
     with the graph weights :math:`w_{ij}` (the diagonal is ignored) and the self weight
     :math:`a_i` (`alpha`). With `n_hops > 1` the step is repeated on its own output, which
-    widens the neighbourhood to cells up to `n_hops` edges away. Cells without neighbours keep
+    widens the neighborhood to cells up to `n_hops` edges away. Cells without neighbors keep
     their values.
 
     On imaging-based spatial data (Xenium, CosMx, ...) a cell has a few hundred counts from a
-    gene panel, so single-cell CNV profiles are noisy. Neighbouring cells in a tumour usually
+    gene panel, so single-cell CNV profiles are noisy. Neighboring cells in a tumor usually
     share the same copy number state, and averaging over them recovers the signal, as kNN
     smoothing in InSituCNV :cite:`Jensen2025` and spatial pooling in SlideCNA :cite:`Zhang2025`
     do. Han et al. :cite:`Han2026` found that aggregating cells on a grid improved CNV recovery
-    on imaging platforms at native resolution. Smoothing also blurs the boundary between tumour
+    on imaging platforms at native resolution. Smoothing also blurs the boundary between tumor
     and normal tissue by about `n_hops` cells.
 
     By default, :func:`infercnvpy.tl.infercnv` sets the values in its noise band to 0, and
     this function averages those zeros. On simulated imaging data, smoothing the unfiltered
     matrix of `tl.infercnv(..., dynamic_threshold=None)` recovered the CNV profiles better and
-    separated tumour from normal cells better than smoothing the filtered one.
+    separated tumor from normal cells better than smoothing the filtered one.
 
     The graph usually comes from :func:`squidpy.gr.spatial_neighbors_knn`, e.g.
     `sq.gr.spatial_neighbors_knn(adata, n_neighs=10)`, or from
     :func:`squidpy.gr.spatial_neighbors_delaunay`. Any cells x cells graph with non-negative
     weights works, as long as the weights are similarities or binary connectivities (a larger
-    weight means a closer neighbour). Distances, e.g. `obsp["spatial_distances"]`, give the
-    farthest neighbours the largest weight and are rejected.
+    weight means a closer neighbor). Distances, e.g. `obsp["spatial_distances"]`, give the
+    farthest neighbors the largest weight and are rejected.
 
     Parameters
     ----------
@@ -192,8 +192,8 @@ def smooth_cnv(
         The result is stored in `adata.obsm["X_{key_added}"]` and `adata.uns[key_added]`.
     alpha
         Weight of the cell itself, between 0 and 1. Default: the cell counts as one more
-        neighbour, i.e. `1 / (n_neighbours + 1)`; with binary connectivities this is the plain
-        mean over the cell and its neighbours.
+        neighbor, i.e. `1 / (n_neighbors + 1)`; with binary connectivities this is the plain
+        mean over the cell and its neighbors.
     n_hops
         Number of smoothing steps.
     inplace
@@ -244,7 +244,7 @@ def smooth_cnv(
     n_isolated = int(np.count_nonzero(np.diff(G.indptr) == 0))
     log_result(
         "smooth_cnv",
-        "smoothed %d cells over %d hops" + (", %d cells without neighbours kept their values" if n_isolated else ""),
+        "smoothed %d cells over %d hops" + (", %d cells without neighbors kept their values" if n_isolated else ""),
         *([X.shape[0], n_hops] + ([n_isolated] if n_isolated else [])),
         time=start,
     )
@@ -269,9 +269,9 @@ def spatial_regions(
     key_added: str | None = None,
     inplace: bool = True,
 ) -> pd.Series | None:
-    r"""Make per-cell labels spatially coherent with a Potts prior on a neighbour graph.
+    r"""Make per-cell labels spatially coherent with a Potts prior on a neighbor graph.
 
-    Any categorical labels work, e.g. tumour/normal calls or CNV clusters from
+    Any categorical labels work, e.g. tumor/normal calls or CNV clusters from
     :func:`infercnvpy.tl.leiden`. The new labels are a local minimum of the energy of a hidden
     Markov random field with a Potts prior,
 
@@ -281,18 +281,18 @@ def spatial_regions(
 
     where :math:`w_{ij}` are the graph weights, symmetrised and scaled so that the average
     cell's weights sum to 1. :math:`\beta` is the penalty for disagreeing with a whole
-    neighbourhood. The unary term :math:`U_i` is either
+    neighborhood. The unary term :math:`U_i` is either
 
     - a label-flip penalty: 0 for the original label of the cell and 1 for any other label
       (default). For binary connectivities, two classes and a cell with the average number of
-      neighbours, the cell changes its label when more than :math:`(1 + 1/\beta) / 2` of its
-      neighbours disagree with it (75% for `beta=2`, 62.5% for `beta=4`).
+      neighbors, the cell changes its label when more than :math:`(1 + 1/\beta) / 2` of its
+      neighbors disagree with it (75% for `beta=2`, 62.5% for `beta=4`).
     - the negative log of per-cell class probabilities (`probabilities`).
 
-    Cells with a missing label (`NaN`) have no unary term and take the label their neighbours
-    favour. The energy is minimised by iterated conditional modes (ICM, :cite:`Besag1986`):
+    Cells with a missing label (`NaN`) have no unary term and take the label their neighbors
+    favor. The energy is minimized by iterated conditional modes (ICM, :cite:`Besag1986`):
     cells are visited in a fixed order and each takes the label with the lowest energy given
-    its neighbours, until a sweep changes nothing or after `n_iter` sweeps. The result is
+    its neighbors, until a sweep changes nothing or after `n_iter` sweeps. The result is
     deterministic and stays close to the input labels; it is not a new clustering.
     STARCH :cite:`Elyanow2021` and CalicoST :cite:`Ma2024` use the same kind of prior on clone labels.
 
@@ -308,7 +308,7 @@ def spatial_regions(
     probabilities
         Key in `adata.obsm` with per-cell class probabilities or non-negative scores, cells x
         classes, in the order of the categories of `adata.obs[key]` (or a
-        :class:`~pandas.DataFrame` with the categories as columns). Rows are normalised to sum
+        :class:`~pandas.DataFrame` with the categories as columns). Rows are normalized to sum
         to 1. Default: use the label-flip penalty.
     beta
         Strength of the spatial prior. `0` returns the input labels (or the most probable class).
@@ -326,7 +326,7 @@ def spatial_regions(
     Sets the following fields:
 
     `adata.obs[key_added]` : :class:`pandas.Categorical`
-        Spatially regularised labels, with the categories of `adata.obs[key]`.
+        Spatially regularized labels, with the categories of `adata.obs[key]`.
     `adata.uns[key_added]["params"]` : :class:`dict`
         Parameters of this call and the number of sweeps run (`n_sweeps`).
     """
