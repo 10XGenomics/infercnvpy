@@ -1,3 +1,5 @@
+import warnings
+
 import dask
 import dask.array as da
 import numpy as np
@@ -5,7 +7,7 @@ import pandas as pd
 import pytest
 import scanpy as sc
 import scipy.sparse as sp
-from anndata import AnnData
+from anndata import AnnData, ImplicitModificationWarning
 from matplotlib import pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
@@ -155,10 +157,94 @@ def test_dendrogram_from_mean_profiles(adata_small):
     tmp.obs["group"] = tmp.obs["group"].cat.remove_unused_categories()
     expected = sc.tl.dendrogram(tmp, "group", var_names=tmp.var_names, inplace=False)["categories_ordered"]
     assert [t.get_text() for t in axes["groupby_ax"].get_yticklabels()] == expected
+    # legacy clusters the group means in the order of their names, which can flip branches
+    tmp.obsm["X_cnv"], tmp.uns["cnv"] = tmp.X, adata_small.uns["cnv"]
+    legacy = cnv.pl.chromosome_heatmap_summary(tmp, groupby="group", dendrogram=True, show=False, mode="legacy")
+    expected = [t.get_text() for t in legacy["groupby_ax"].get_yticklabels()]
+    del adata_small.uns["dendrogram_group"]  # stored by the call above, and used by later ones
     summary = cnv.pl.chromosome_heatmap_summary(adata_small, groupby="group", dendrogram=True, show=False)
     assert [t.get_text() for t in summary["groupby_ax"].get_yticklabels()] == expected
     X, g = adata_small.obsm["X_cnv"].toarray(), adata_small.obs["group"]
     np.testing.assert_allclose(_image(summary), [X[(g == c).to_numpy()].mean(axis=0) for c in expected], rtol=1e-6)
+
+
+def _many_windows(seed: int) -> AnnData:
+    """400 cells in 8 groups x 300 windows: more windows than scanpy's `N_PCS`, so its dendrogram uses a PCA."""
+    rng = np.random.default_rng(seed)
+    profiles = rng.normal(size=(8, 300)) * (rng.random((8, 300)) < 0.3)
+    labels = rng.integers(0, 8, 400)
+    X = (profiles[labels] + rng.normal(scale=0.7, size=(400, 300))).astype(np.float32)
+    groups = pd.Categorical([f"G{i}" for i in labels], categories=[f"G{i}" for i in (3, 0, 6, 1, 7, 4, 2, 5)])
+    obs = pd.DataFrame({"g": groups}, index=[str(i) for i in range(400)])
+    adata = AnnData(obs=obs, uns={"cnv": {"chr_pos": {"chr1": 0, "chr2": 150}}})
+    adata.obsm["X_cnv"] = X
+    return adata
+
+
+@pytest.mark.parametrize("fmt", [np.asarray, sp.csr_matrix, _dask, lambda X: _dask(sp.csr_matrix(X), 50)])
+@pytest.mark.parametrize("seed", [0, 1, 2])
+@both_plots
+def test_dendrogram_like_legacy_with_many_windows(fmt, seed, plot):
+    legacy = plot(_many_windows(seed), groupby="g", dendrogram=True, show=False, mode="legacy")
+    expected = [t.get_text() for t in legacy["groupby_ax"].get_yticklabels()]
+    adata = _many_windows(seed)
+    adata.obsm["X_cnv"] = fmt(adata.obsm["X_cnv"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)  # not scanpy's warning that it falls back to a PCA
+        fast = plot(adata, groupby="g", dendrogram=True, show=False)
+    assert [t.get_text() for t in fast["groupby_ax"].get_yticklabels()] == expected
+
+
+@both_plots
+def test_dendrogram_is_stored_and_reused(plot, monkeypatch):
+    """The computed dendrogram is stored as `scanpy.tl.dendrogram` stores it, and later calls (also legacy) use it."""
+    adata = _many_windows(0)
+    first = plot(adata, groupby="g", dendrogram=True, show=False)
+    order = [t.get_text() for t in first["groupby_ax"].get_yticklabels()]
+    stored = adata.uns["dendrogram_g"]
+    tmp = AnnData(
+        np.random.default_rng(0).normal(size=(8, 3)),
+        obs=pd.DataFrame({"g": adata.obs["g"].cat.categories.astype("category")}),
+    )
+    assert set(stored) == set(sc.tl.dendrogram(tmp, "g", inplace=False))
+    assert stored["groupby"] == ["g"]
+    assert stored["categories_ordered"] == order
+
+    def fail(*args, **kwargs):
+        raise AssertionError("recomputed")
+
+    monkeypatch.setattr("infercnvpy.pl._chromosome_heatmap._dendrogram", fail)
+    monkeypatch.setattr(sc.tl, "dendrogram", fail)
+    for mode in ("fast", "legacy"):
+        again = plot(adata, groupby="g", dendrogram=True, show=False, mode=mode)
+        assert [t.get_text() for t in again["groupby_ax"].get_yticklabels()] == order
+
+
+@pytest.mark.parametrize("kwargs", [{}, {"log": True}, {"aggregate": "mean"}])
+def test_standard_scale_var_over_all_cells(adata_small, kwargs):
+    """Each window is scaled with its minimum and maximum over all cells, not only the drawn ones."""
+    if kwargs.get("log"):
+        adata_small.obsm["X_cnv"] *= 0.2  # log1p needs values above -1
+    axes = cnv.pl.chromosome_heatmap(
+        adata_small, groupby="group", figsize=(4, 0.2), standard_scale="var", show=False, **kwargs
+    )
+    values = _image(axes)
+    assert len(values) < 59
+    raw = _image(cnv.pl.chromosome_heatmap(adata_small, groupby="group", figsize=(4, 0.2), show=False, **kwargs))
+    X = adata_small.obsm["X_cnv"].toarray()
+    X = np.log1p(X) if kwargs.get("log") else X
+    lo, hi = X.min(axis=0), X.max(axis=0)
+    np.testing.assert_allclose(values, (raw - lo) / (hi - lo), rtol=1e-6, atol=1e-7)
+
+
+def test_legacy_stores_group_colors(adata_small):
+    """scanpy gets an actual AnnData that shares `uns`, so the colours it picks land in the caller's `uns`."""
+    adata_small = adata_small[adata_small.obs["group"].notna()].copy()
+    del adata_small.uns["group_colors"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ImplicitModificationWarning)
+        cnv.pl.chromosome_heatmap(adata_small, groupby="group", show=False, mode="legacy")
+    assert "group_colors" in adata_small.uns
 
 
 @both_plots
@@ -306,6 +392,46 @@ def test_save(adata_small, tmp_path):
         sc.settings.figdir = figdir
     ext = sc.settings.file_format_figs
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted([f"heatmap.{ext}", "heatmap_summary.png"])
+
+
+@pytest.mark.parametrize("mode", ["fast", "legacy"])
+@both_plots
+def test_save_like_scanpy(adata_small, tmp_path, plot, mode):
+    """`save` names the file as `scanpy.pl.heatmap` does, and the figure is closed after saving unless returned."""
+    adata_small = adata_small[adata_small.obs["group"].notna()].copy()
+    figdir, fmt = sc.settings.figdir, sc.settings.file_format_figs
+    sc.settings.figdir, sc.settings.file_format_figs = tmp_path, "pdf"
+    try:
+        plot(adata_small, groupby="group", show=False, save=".png", mode=mode)
+        plot(adata_small, groupby="group", show=False, save="", mode=mode)
+        assert not plt.get_fignums()
+        fig = plot(adata_small, groupby="group", save="_fig.svg", return_fig=True, mode=mode)
+        assert plt.fignum_exists(fig.number)
+        if mode == "fast":
+            _, ax = plt.subplots()
+            plot(adata_small, groupby="group", ax=ax, show=False, save="_ax")
+            assert plt.fignum_exists(ax.get_figure(root=True).number)
+    finally:
+        sc.settings.figdir, sc.settings.file_format_figs = figdir, fmt
+    expected = {"heatmap.png", "heatmap.pdf", "heatmap_fig.svg"} | ({"heatmap_ax.pdf"} if mode == "fast" else set())
+    assert {p.name for p in tmp_path.iterdir()} == expected
+
+
+@pytest.mark.parametrize("mode", ["fast", "legacy"])
+def test_autosave(adata_small, tmp_path, mode):
+    """With `scanpy.settings.autosave`, the heatmap is saved once (scanpy's own save does not leave a blank one)."""
+    adata_small = adata_small[adata_small.obs["group"].notna()].copy()
+    settings = sc.settings.figdir, sc.settings.file_format_figs, sc.settings.autosave
+    sc.settings.figdir, sc.settings.file_format_figs, sc.settings.autosave = tmp_path, "png", True
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            cnv.pl.chromosome_heatmap(adata_small, groupby="group", show=False, mode=mode)
+    finally:
+        sc.settings.figdir, sc.settings.file_format_figs, sc.settings.autosave = settings
+    assert [p.name for p in tmp_path.iterdir()] == ["heatmap.png"]
+    assert (plt.imread(tmp_path / "heatmap.png")[..., :3] < 0.9).any()
+    assert not plt.get_fignums()
 
 
 def test_bad_arguments(adata_small):

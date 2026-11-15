@@ -1,10 +1,13 @@
 import logging
+import warnings
 
 import numpy as np
 import pandas as pd
 import pytest
+import scanpy as sc
 import scipy.sparse as sp
 from anndata import AnnData
+from matplotlib import pyplot as plt
 from scipy.spatial import cKDTree
 
 import infercnvpy as cnv
@@ -233,3 +236,57 @@ def test_spatial_cnv_colorbar_label():
     axes = cnv.pl.spatial_cnv(adata, region="chr1", color="label", show=False)
     [cbar] = [c.colorbar for ax in axes for c in ax.collections if c.colorbar is not None]
     assert cbar.ax.get_ylabel() == "mean CNV (relative to reference)"
+
+
+@pytest.fixture
+def adata_spatial() -> AnnData:
+    """30 spots on a tissue four times as wide as high, with a categorical and a continuous `obs` column."""
+    rng = np.random.default_rng(0)
+    n = 30
+    obs = pd.DataFrame(
+        {"label": pd.Categorical(rng.choice(["x", "y"], n)), "score": rng.uniform(100, 200, n)},
+        index=[str(i) for i in range(n)],
+    )
+    adata = AnnData(obs=obs, uns={"cnv": {"chr_pos": {"chr1": 0, "chr2": 2}}})
+    adata.obsm["X_cnv"] = rng.normal(size=(n, 4)).astype(np.float32)
+    adata.obsm["spatial"] = np.column_stack([rng.uniform(0, 4000, n), rng.uniform(0, 1000, n)])
+    return adata
+
+
+def test_spatial_cnv_panels(adata_spatial):
+    """Region panels are found by position (whatever their title) and centred at 0; other panels are not."""
+    axes = cnv.pl.spatial_cnv(
+        adata_spatial, region=["chr1", "chr2"], color=["label", "score"], title=["A", "B", "C", "D"], show=False
+    )
+    assert [ax.get_title() for ax in axes] == ["A", "B", "C", "D"]
+    for ax in axes[:2]:
+        [points] = ax.collections
+        assert points.norm.vcenter == 0
+        assert points.colorbar.ax.get_ylabel() == "mean CNV (relative to reference)"
+    [score] = axes[3].collections
+    score_range = adata_spatial.obs["score"].min(), adata_spatial.obs["score"].max()
+    assert (score.norm.vmin, score.norm.vmax) == pytest.approx(score_range)
+    assert score.colorbar.ax.get_ylabel() == ""
+    for ax in axes:  # as `scanpy.pl.spatial` draws without an image
+        assert ax.get_aspect() == 1
+        assert ax.yaxis_inverted()
+
+
+def test_spatial_cnv_saves_once(adata_spatial, tmp_path):
+    plt.close("all")
+    settings = sc.settings.figdir, sc.settings.file_format_figs, sc.settings.autosave
+    sc.settings.figdir, sc.settings.file_format_figs = tmp_path, "png"
+    try:
+        sc.settings.autosave = True
+        cnv.pl.spatial_cnv(adata_spatial, region="chr1", show=False)
+        sc.settings.autosave = False
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            cnv.pl.spatial_cnv(adata_spatial, region="chr1", show=False, save="_cnv.png")
+        fig = cnv.pl.spatial_cnv(adata_spatial, region="chr1", return_fig=True, save="_fig.png")
+    finally:
+        sc.settings.figdir, sc.settings.file_format_figs, sc.settings.autosave = settings
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["spatial.png", "spatial_cnv.png", "spatial_fig.png"]
+    for p in tmp_path.iterdir():
+        assert (plt.imread(p)[..., :3] < 0.9).any(), p.name
+    assert plt.get_fignums() == [fig.number]

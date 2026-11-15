@@ -114,6 +114,37 @@ def binned_sums(X: Any, order: np.ndarray, bounds: np.ndarray) -> np.ndarray:
     return sums
 
 
+def column_ranges(X: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Minimum and maximum of each column of `X` over all rows (with the zeros of a sparse matrix), NaNs ignored."""
+    lo, hi = np.full(X.shape[1], np.inf), np.full(X.shape[1], -np.inf)
+
+    def update(Xb, row0, n, start):
+        rows = Xb[row0 : row0 + n]
+        if sp.issparse(rows):
+            b_lo, b_hi = rows.nanmin(axis=0).toarray().ravel(), rows.nanmax(axis=0).toarray().ravel()
+        else:
+            b_lo, b_hi = np.fmin.reduce(rows, axis=0), np.fmax.reduce(rows, axis=0)
+        np.fmin(lo, b_lo, out=lo)
+        np.fmax(hi, b_hi, out=hi)
+
+    _each_block(_blocks(X), update)
+    return lo, hi
+
+
+def gram(X: Any) -> tuple[np.ndarray, np.ndarray]:
+    """`X.T @ X` and the column sums of `X`, in float64, `CHUNKSIZE` rows at a time."""
+    G, sums = np.zeros((X.shape[1], X.shape[1])), np.zeros(X.shape[1])
+
+    def add(Xb, row0, n, start):
+        for s in range(row0, row0 + n, CHUNKSIZE):
+            rows = Xb[s : min(s + CHUNKSIZE, row0 + n)].astype(np.float64)
+            G[:] += (rows.T @ rows).toarray() if sp.issparse(rows) else rows.T @ rows
+            sums[:] += np.asarray(rows.sum(axis=0)).ravel()
+
+    _each_block(_blocks(X), add)
+    return G, sums
+
+
 def sampled_rows(X: Any, picks: np.ndarray) -> tuple[np.ndarray, float, float]:
     """Rows `picks` of `X` as a dense float64 array, and the min and max of all values of `X`.
 

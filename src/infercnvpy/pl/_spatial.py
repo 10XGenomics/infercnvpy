@@ -6,10 +6,9 @@ from collections.abc import Sequence
 import numpy as np
 import scanpy as sc
 from anndata import AnnData
-from matplotlib.figure import Figure
 
 from infercnvpy._util import _as_df, _as_matrix
-from infercnvpy.pl._chromosome_heatmap import CBAR_LABEL
+from infercnvpy.pl._chromosome_heatmap import CBAR_LABEL, _finish
 
 _REGION = re.compile(r"^(?P<chrom>[^:]+)(?::(?P<start>[\d_,]+)-(?P<end>[\d_,]+))?$")
 
@@ -53,7 +52,8 @@ def spatial_cnv(
     Thin wrapper around :func:`scanpy.pl.embedding` with `basis="spatial"`. Each region
     becomes a panel coloured by the mean of `adata.obsm["X_{use_rep}"]` over its windows,
     with a diverging colour map centred at 0 (pass `vcenter=None` to turn that off).
-    `adata.obsm["X_{use_rep}"]` must be in memory.
+    As :func:`scanpy.pl.spatial` without an image, the panels have an equal aspect and the
+    y axis points down. `adata.obsm["X_{use_rep}"]` must be in memory.
 
     Parameters
     ----------
@@ -74,11 +74,13 @@ def spatial_cnv(
     cmap
         Colour map of the regions (and other continuous panels).
     **kwargs
-        Passed to :func:`scanpy.pl.embedding`, e.g. `size`, `ncols`, `vmin`/`vmax` or `show`.
+        Passed to :func:`scanpy.pl.embedding`, e.g. `size`, `ncols`, `vmin`/`vmax`, `show`,
+        `save` (a string is appended to the file name `basis`) or `return_fig`.
 
     Returns
     -------
-    Whatever :func:`scanpy.pl.embedding` returns: `None`, or the axes if `show=False`.
+    The figure if `return_fig` is true. Otherwise, if `show` is false, the axes as
+    :func:`scanpy.pl.embedding` returns them.
     """
     regions = [region] if isinstance(region, str) else list(region or [])
     colors = [color] if isinstance(color, str) else list(color or [])
@@ -91,20 +93,18 @@ def spatial_cnv(
             obs[f"{use_rep} {r}"] = np.asarray(X[:, _region_columns(adata, use_rep, r)].mean(axis=1)).ravel()
     tmp = AnnData(obs=obs, uns=adata.uns)
     tmp.obsm[basis] = np.asarray(adata.obsm[basis])
-    if regions:
-        kwargs.setdefault("vcenter", 0)
-    show, save = kwargs.pop("show", None), kwargs.pop("save", None)
-    titles = [f"{use_rep} {r}" for r in regions]
-    res = sc.pl.embedding(tmp, basis, color=titles + colors, cmap=cmap, show=False, **kwargs)
-    fig = res if isinstance(res, Figure) else np.ravel(res)[0].get_figure(root=True)
-    for ax in fig.axes:
-        if ax.get_title() in titles:
-            for points in ax.collections:
-                if points.colorbar is not None:
-                    points.colorbar.set_label(f"mean {CBAR_LABEL}")
-    if isinstance(res, Figure):  # `return_fig=True`: scanpy neither saves nor shows
-        return res
-    from infercnvpy.pl._chromosome_heatmap_legacy import savefig_or_show
-
-    savefig_or_show(basis, show=show, save=save)
-    return None if (sc.settings.autoshow if show is None else show) else res
+    kwargs.setdefault("vcenter", [0] * len(regions) + [None] * len(colors))
+    show, save, return_fig = (kwargs.pop(k, None) for k in ("show", "save", "return_fig"))
+    color = [f"{use_rep} {r}" for r in regions] + colors
+    res = sc.pl.embedding(tmp, basis, color=color, cmap=cmap, show=False, save=False, **kwargs)
+    panels = res if isinstance(res, list) else [res]
+    for ax in panels:
+        ax.set_aspect("equal")
+        ax.invert_yaxis()
+    for ax in panels[: len(regions)]:
+        for points in ax.collections:
+            if points.colorbar is not None:
+                points.colorbar.set_label(f"mean {CBAR_LABEL}")
+    fig = panels[0].get_figure(root=True)
+    assert fig is not None
+    return _finish(fig, res, show=show, save=save, return_fig=return_fig, name=basis, own=kwargs.get("ax") is None)

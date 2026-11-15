@@ -15,14 +15,14 @@ from matplotlib.artist import Artist
 from matplotlib.colors import BoundaryNorm, Colormap, ListedColormap, Normalize, TwoSlopeNorm
 from matplotlib.path import Path as MplPath
 from matplotlib.text import Text
-from matplotlib.ticker import Formatter
+from matplotlib.ticker import FixedFormatter
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from mpl_toolkits.axes_grid1.axes_size import Fixed
 
 from infercnvpy._logging import SKIP_OWN_FRAMES
 from infercnvpy._numba import n_kernel_chunks, numba_threads
 from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column
-from infercnvpy.pl._heatmap_kernels import binned_sums, pixel_rows, sampled_rows
+from infercnvpy.pl._heatmap_kernels import binned_sums, column_ranges, gram, pixel_rows, sampled_rows
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -121,9 +121,11 @@ def chromosome_heatmap(
     **kwargs
         Arguments of :func:`scanpy.pl.heatmap`, see `mode`. By default, the colour scale is a
         :class:`~matplotlib.colors.TwoSlopeNorm` centred at `vcenter=0`, with limits from the data. Pass the same
-        `vmin` and `vmax` to compare figures across modes, representations or datasets. `dendrogram=True` orders the groups by
-        hierarchical clustering of their mean CNV profiles (Pearson correlation, complete linkage, as
-        :func:`scanpy.tl.dendrogram`) and draws the dendrogram next to the heatmap.
+        `vmin` and `vmax` to compare figures across modes, representations or datasets. `dendrogram=True` orders the
+        groups as :func:`scanpy.tl.dendrogram` with its defaults clusters them (as `mode="legacy"`; with more windows
+        than `scanpy.settings.N_PCS`, it clusters the groups' means of a PCA of all cells) and draws the dendrogram
+        next to the heatmap. A dendrogram stored in `adata.uns[f"dendrogram_{groupby}"]` is used if it has the same
+        groups; otherwise the computed one is stored there, as `mode="legacy"` does.
 
     Returns
     -------
@@ -136,15 +138,16 @@ def chromosome_heatmap(
     if _use_legacy("chromosome_heatmap", adata, groupby, use_rep, mode, kwargs):
         return _legacy(_legacy_heatmap, adata, groupby, use_rep, cmap, figsize, ax, show, save, return_fig, kwargs)
     opts = _Options.pop(kwargs)
+    own = ax is None
     fig, ax = _figure(ax, figsize)
     cat = _categories(adata, groupby)
     palette = _group_colors(adata, groupby, len(cat.categories))
     X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`adata.obsm['X_{use_rep}']`", lazy=True)
-    dendro = None
+    dendro, var_range = None, None
     with numba_threads(n_jobs):
         if opts.dendrogram:
             cat, palette, dendro = _order_by_dendrogram(
-                adata, groupby, cat, palette, lambda: _group_means(X, cat.codes.astype(np.int64), len(cat.categories))
+                adata, groupby, cat, palette, lambda: _dendrogram(X, cat, groupby)
             )
         codes = cat.codes.astype(np.int64)
         order, bounds, rows = pixel_rows(codes, len(cat.categories), _n_pixel_rows(fig, ax, swap=opts.swap_axes))
@@ -152,14 +155,16 @@ def chromosome_heatmap(
             values, lo, hi = sampled_rows(X, order[(bounds[:-1] + bounds[1:]) // 2])
         else:
             values = binned_sums(X, order, bounds) / np.diff(bounds)[:, None]
-    values = opts.transform(values)
+        if opts.standard_scale == "var":
+            var_range = column_ranges(X)
+    values = opts.transform(values, var_range)
     if aggregate == "mean":
         lo, hi = np.nanmin(values), np.nanmax(values)
         center = 0 if opts.vcenter is None else opts.vcenter
         lo, hi = min(lo, center - 1e-9), max(hi, center + 1e-9)  # TwoSlopeNorm needs vmin < vcenter < vmax
     norm = opts.color_norm(lo, hi)
     axes = _draw(fig, ax, adata, groupby, cat, palette, values, rows, dendro, use_rep, norm, cmap, opts)
-    return _finish(fig, axes, show=show, save=save, return_fig=return_fig)
+    return _finish(fig, axes, show=show, save=save, return_fig=return_fig, own=own)
 
 
 def chromosome_heatmap_summary(
@@ -232,6 +237,7 @@ def chromosome_heatmap_summary(
     if _use_legacy("chromosome_heatmap_summary", adata, groupby, use_rep, mode, kwargs):
         return _legacy(_legacy_summary, adata, groupby, use_rep, cmap, figsize, ax, show, save, return_fig, kwargs)
     opts = _Options.pop(kwargs)
+    own = ax is None
     fig, ax = _figure(ax, figsize)
     cat = _categories(adata, groupby)
     palette = _group_colors(adata, groupby, len(cat.categories))
@@ -242,12 +248,17 @@ def chromosome_heatmap_summary(
     if opts.dendrogram:
         present = np.flatnonzero(np.bincount(cat.codes[cat.codes >= 0], minlength=len(cat.categories)))
         before = list(cat.categories[present])
-        cat, palette, dendro = _order_by_dendrogram(adata, groupby, cat, palette, lambda: means)
+        # as `mode="legacy"`: every group mean 10 times, the groups sorted as `astype("category")` sorts them
+        groups = pd.Categorical(np.repeat(before, 10))
+        by_name = means[[before.index(c) for c in groups.categories]]
+        cat, palette, dendro = _order_by_dendrogram(
+            adata, groupby, cat, palette, lambda: _dendrogram(np.repeat(means, 10, axis=0), groups, groupby, by_name)
+        )
         means = means[[before.index(c) for c in cat.categories if c in before]]
     rows = (np.bincount(cat.codes[cat.codes >= 0], minlength=len(cat.categories)) > 0).astype(np.int64)
     norm = opts.color_norm(float(np.min(means)), float(np.max(means)))
     axes = _draw(fig, ax, adata, groupby, cat, palette, opts.transform(means), rows, dendro, use_rep, norm, cmap, opts)
-    return _finish(fig, axes, show=show, save=save, return_fig=return_fig)
+    return _finish(fig, axes, show=show, save=save, return_fig=return_fig, own=own)
 
 
 # --- options of mode="fast" -------------------------------------------------------------------------------------------
@@ -274,15 +285,22 @@ class _Options:
         kwargs.clear()
         return opts
 
-    def transform(self, values: np.ndarray) -> np.ndarray:
-        """`log` and `standard_scale` of the drawn rows, as :func:`scanpy.pl.heatmap` does for all cells."""
+    def transform(self, values: np.ndarray, var_range: tuple[np.ndarray, np.ndarray] | None = None) -> np.ndarray:
+        """`log` and `standard_scale` of the drawn rows, as :func:`scanpy.pl.heatmap` does for all cells.
+
+        `var_range` is the minimum and maximum of each window over all cells; without it, `standard_scale="var"`
+        scales over the drawn rows.
+        """
         if self.log:
             values = np.log1p(values)
         if self.standard_scale is not None:
             axis = 0 if self.standard_scale == "var" else 1
-            values = values - np.nanmin(values, axis=axis, keepdims=True)
+            if self.standard_scale == "var" and var_range is not None:
+                lo, hi = (np.log1p(r) if self.log else r for r in var_range)
+            else:
+                lo, hi = np.nanmin(values, axis=axis, keepdims=True), np.nanmax(values, axis=axis, keepdims=True)
             with np.errstate(invalid="ignore", divide="ignore"):
-                values = np.nan_to_num(values / np.nanmax(values, axis=axis, keepdims=True), nan=0)
+                values = np.nan_to_num((values - lo) / (hi - lo), nan=0)
         return values
 
     def color_norm(self, lo: float, hi: float) -> Normalize:
@@ -339,7 +357,7 @@ def _use_legacy(func: str, adata: AnnData, groupby: str, use_rep: str, mode: str
 
 
 def _legacy(
-    fn: Callable[..., dict[str, Axes] | None],
+    fn: Callable[..., dict[str, Axes]],
     adata: AnnData,
     groupby: str,
     use_rep: str,
@@ -353,23 +371,19 @@ def _legacy(
 ) -> Figure | dict[str, Axes] | None:
     if ax is not None:
         raise ValueError("`ax` needs mode='fast' (and only arguments that it supports, see `mode`).")
-    common = {"groupby": groupby, "use_rep": use_rep, "cmap": cmap, "figsize": figsize, "save": save}
-    if not return_fig:
-        return fn(adata, show=show, **common, **kwargs)
-    axes = fn(adata, show=False, **common, **kwargs)
-    assert axes is not None
+    axes = fn(adata, groupby=groupby, use_rep=use_rep, cmap=cmap, figsize=figsize, **kwargs)
     fig = axes["heatmap_ax"].get_figure(root=True)
     assert fig is not None
-    return fig
+    return _finish(fig, axes, show=show, save=save, return_fig=return_fig)
 
 
-def _legacy_heatmap(adata: AnnData, **kwargs) -> dict[str, Axes] | None:
+def _legacy_heatmap(adata: AnnData, **kwargs) -> dict[str, Axes]:
     from infercnvpy.pl._chromosome_heatmap_legacy import legacy_heatmap
 
     return legacy_heatmap(adata, **kwargs)
 
 
-def _legacy_summary(adata: AnnData, **kwargs) -> dict[str, Axes] | None:
+def _legacy_summary(adata: AnnData, **kwargs) -> dict[str, Axes]:
     from infercnvpy.pl._chromosome_heatmap_legacy import legacy_summary
 
     return legacy_summary(adata, **kwargs)
@@ -426,35 +440,61 @@ def _group_means(X: Any, codes: np.ndarray, n_groups: int) -> np.ndarray:
 
 
 def _order_by_dendrogram(
-    adata: AnnData, groupby: str, cat: pd.Categorical, palette: list, means: Callable[[], np.ndarray]
+    adata: AnnData, groupby: str, cat: pd.Categorical, palette: list, compute: Callable[[], dict[str, Any]]
 ) -> tuple[pd.Categorical, list, dict[str, Any] | None]:
     """Reorder the categories (and their colours) as the leaves of the dendrogram of the non-empty groups.
 
     The dendrogram is `adata.uns[f"dendrogram_{groupby}"]` from :func:`scanpy.tl.dendrogram` if that has exactly
-    these groups, as for `mode="legacy"`, otherwise it is computed from the groups' mean CNV profiles (`means()`).
-    Unused categories go last. With fewer than two groups, there is no dendrogram.
+    these groups, otherwise `compute()`, which is stored there as `mode="legacy"` does. Unused categories go last.
+    With fewer than two groups, there is no dendrogram.
     """
     present = np.flatnonzero(np.bincount(cat.codes[cat.codes >= 0], minlength=len(cat.categories)))
     if len(present) < 2:
         return cat, palette, None
     labels = [str(c) for c in cat.categories[present]]
-    stored = adata.uns.get(f"dendrogram_{groupby}", {}).get("dendrogram_info")
-    if stored is not None and sorted(map(str, stored["ivl"])) == sorted(labels):
-        dendro = {**stored, "leaves": [labels.index(str(c)) for c in stored["ivl"]]}
-    else:
-        dendro = _dendrogram(means(), labels)
+    key = f"dendrogram_{groupby}"
+    dendro = adata.uns.get(key, {}).get("dendrogram_info")
+    if dendro is None or sorted(map(str, dendro["ivl"])) != sorted(labels):
+        stored = compute()
+        if not adata.is_view:
+            adata.uns[key] = stored
+        dendro = stored["dendrogram_info"]
+    dendro = {**dendro, "leaves": [labels.index(str(c)) for c in dendro["ivl"]]}
     new = [*present[dendro["leaves"]], *np.setdiff1d(np.arange(len(cat.categories)), present)]
     return cat.reorder_categories(cat.categories[new]), [palette[i] for i in new], dendro
 
 
-def _dendrogram(means: np.ndarray, labels: list[str]) -> dict[str, Any]:
-    """`scipy.cluster.hierarchy.dendrogram` of the groups, computed like :func:`scanpy.tl.dendrogram`."""
-    import scipy.cluster.hierarchy as sch
-    from scipy.spatial import distance
+def _dendrogram(X: Any, groups: pd.Categorical, groupby: str, means: np.ndarray | None = None) -> dict[str, Any]:
+    """What :func:`scanpy.tl.dendrogram` with its defaults stores for the rows of `X` grouped by `groups` (as legacy).
 
-    corr = np.clip(pd.DataFrame(means.T).corr().to_numpy(), -1, 1)
-    z = sch.linkage(distance.squareform(1 - corr, checks=False), method="complete")
-    return sch.dendrogram(z, labels=labels, no_plot=True)
+    `means` are the means of the non-empty groups in the order of the categories, if already known. With more
+    windows than `scanpy.settings.N_PCS`, scanpy clusters the groups' means of a PCA of all rows (`_pca_group_means`).
+    """
+    if means is None:
+        means = _group_means(X, groups.codes.astype(np.int64), len(groups.categories))
+    if X.shape[1] > sc.settings.N_PCS:
+        means = _pca_group_means(X, means)
+    present = groups.remove_unused_categories().categories
+    obs = pd.DataFrame({groupby: pd.Categorical(present, categories=present)})
+    obs.index = obs.index.astype(str)
+    return sc.tl.dendrogram(AnnData(means, obs=obs), groupby, inplace=False)
+
+
+def _pca_group_means(X: Any, means: np.ndarray) -> np.ndarray:
+    """The groups' means (`means`, in windows) in the cells' PCA of :func:`scanpy.pp.pca` with its defaults.
+
+    The PCA comes from the eigenvectors of the covariance, with the signs of :func:`sklearn.utils.extmath.svd_flip`.
+    """
+    import scipy.linalg
+
+    n, m = X.shape
+    n_comps = min(n, m) - 1 if min(n, m) <= sc.settings.N_PCS else sc.settings.N_PCS
+    G, sums = gram(X)
+    mu = sums / n
+    _, vecs = scipy.linalg.eigh((G - n * np.outer(mu, mu)) / (n - 1))
+    comps = vecs[:, ::-1][:, :n_comps].T
+    comps *= np.sign(comps[np.arange(n_comps), np.abs(comps).argmax(axis=1)])[:, None]
+    return (means - mu) @ comps.T
 
 
 # --- drawing --------------------------------------------------------------------------------------------------------
@@ -601,29 +641,18 @@ def _chromosome_brackets(
 def _thin_group_labels(ax: Axes, labels: list[str], centers: np.ndarray, rows: np.ndarray, *, swap: bool) -> None:
     """Leave out the tick labels of groups that would overlap the label of a larger group, at drawing time."""
     axis = ax.xaxis if swap else ax.yaxis
-    formatter = _ThinnedLabels(labels)
+    formatter = FixedFormatter(labels)
     axis.set_major_formatter(formatter)
 
     def thin(renderer: RendererBase) -> None:
         proto = axis.get_major_ticks()[0].label1  # font and rotation of the tick labels
         pos = ax.transData.transform(np.column_stack([centers, centers]))[:, 0 if swap else 1]
         extent = np.array([_extent(proto, label, renderer, along_x=swap) for label in labels])
-        formatter.shown = _keep_labels(pos, extent, rows)
+        formatter.seq = [
+            label if keep else "" for label, keep in zip(labels, _keep_labels(pos, extent, rows), strict=True)
+        ]
 
     ax.add_artist(_BeforeDraw(thin))
-
-
-class _ThinnedLabels(Formatter):
-    """Fixed tick labels (as `set_ticks(ticks, labels)`), of which only those in `shown` are drawn."""
-
-    def __init__(self, labels: list[str]):
-        self.labels = labels
-        self.shown = np.ones(len(labels), dtype=bool)
-
-    def __call__(self, x: float, pos: int | None = None) -> str:
-        if pos is None or pos >= len(self.labels) or not self.shown[pos]:
-            return ""
-        return self.labels[pos]
 
 
 class _BeforeDraw(Artist):
@@ -661,26 +690,36 @@ def _keep_labels(pos: np.ndarray, extent: np.ndarray, priority: np.ndarray) -> n
     return keep
 
 
-def _finish(
-    fig: Figure, axes: dict[str, Axes], *, show: bool | None, save: str | bool | None, return_fig: bool | None
-) -> Figure | dict[str, Axes] | None:
-    if sc.settings.autosave if save is None else save:
-        _save(fig, save)
+def _finish[T](
+    fig: Figure,
+    axes: T,
+    *,
+    show: bool | None,
+    save: str | bool | None,
+    return_fig: bool | None,
+    name: str = "heatmap",
+    own: bool = True,
+) -> Figure | T | None:
+    """Save, show and return as scanpy's `savefig_or_show` does.
+
+    The figure is saved as `<figdir>/<name><save><plot_suffix>.<ext>`, with `ext` from the end of `save` if that is
+    `.svg`, `.pdf` or `.png`. A saved figure is closed unless it is returned or not `own` (drawn into a given `ax`).
+    """
+    saved = sc.settings.autosave if save is None else isinstance(save, str) or save
+    if saved:
+        ext = sc.settings.file_format_figs
+        if isinstance(save, str):
+            if save.endswith((".svg", ".pdf", ".png")):
+                save, ext = save[:-4], save[-3:]
+            name += save
+        figdir = Path(sc.settings.figdir)
+        figdir.mkdir(parents=True, exist_ok=True)
+        fig.savefig(figdir / f"{name}{sc.settings.plot_suffix}.{ext}", bbox_inches="tight")
     if return_fig:
         return fig
-    if sc.settings.autoshow if show is None else show:
+    show = sc.settings.autoshow if show is None else show
+    if show:
         plt.show()
-        return None
-    return axes
-
-
-def _save(fig: Figure, save: str | bool | None) -> None:
-    """Save as `<figdir>/heatmap<save><plot_suffix>.<ext>`, the file name `scanpy.pl.heatmap` used."""
-    name, ext = "heatmap", sc.settings.file_format_figs
-    if isinstance(save, str):
-        if (suffix := Path(save).suffix) in {".svg", ".pdf", ".png"}:
-            save, ext = save.removesuffix(suffix), suffix[1:]
-        name += save
-    figdir = Path(sc.settings.figdir)
-    figdir.mkdir(parents=True, exist_ok=True)
-    fig.savefig(figdir / f"{name}{sc.settings.plot_suffix}.{ext}", bbox_inches="tight")
+    if saved and own:
+        plt.close(fig)
+    return None if show else axes
