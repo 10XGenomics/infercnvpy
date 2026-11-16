@@ -15,6 +15,7 @@ from ._spatial import smooth_cnv, spatial_regions
 __all__ = [
     "cnv_score",
     "copy_number",
+    "copykat",
     "infercnv",
     "ithcna",
     "ithgex",
@@ -25,6 +26,20 @@ __all__ = [
     "tsne",
     "umap",
 ]
+
+
+# TODO: remove in about 0.9.0
+def copykat(*args, **kwargs):
+    """Replaced by :func:`~infercnvpy.tl.copy_number`.
+
+    .. deprecated:: 0.7.0
+    """
+    raise NotImplementedError(
+        "`tl.copykat` was replaced by `tl.copy_number`. Use "
+        "`cnv.tl.copy_number(adata, reference_key=..., reference_cat=...)`, with the normal cells of CopyKAT's "
+        "`norm_cell_names` as the reference; it writes per-cell labels to `adata.obs['copy_number']` and the copy "
+        "number profiles to `adata.obsm['X_copy_number']`."
+    )
 
 
 @_deprecated_positional("neighbors_key", "key_added", "inplace")

@@ -344,3 +344,8 @@ def test_positional_arguments_from_0_6_still_work(adata_cnv_neighbors):
     assert "X_ts" in adata.obsm
     with pytest.raises(TypeError, match="positional arguments"):
         cnv.pp.neighbors(adata, "cnv_pca", "nb", True, "extra")
+
+
+def test_copykat_stub(adata_mock):
+    with pytest.raises(NotImplementedError, match=r"tl\.copy_number"):
+        cnv.tl.copykat(adata_mock)
