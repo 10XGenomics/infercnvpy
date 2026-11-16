@@ -16,6 +16,7 @@ from anndata import AnnData, read_h5ad
 from matplotlib import pyplot as plt
 from matplotlib.testing.compare import compare_images
 from packaging.version import Version
+from scipy.spatial import cKDTree
 from scverse_misc.logging import config as log_config
 
 import infercnvpy as cnv
@@ -31,6 +32,13 @@ def _logging_state():
     verbosity_orig = log_config.verbosity
     yield
     log_config.verbosity = verbosity_orig
+
+
+@pytest.fixture(autouse=True)
+def _close_figures():
+    """Close figures a test leaves open, so tests that count open figures don't depend on the order."""
+    yield
+    plt.close("all")
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -251,3 +259,42 @@ def adata_ithgex(request):
         ),
         var=pd.DataFrame(index=["x", "y", "z"]),
     )
+
+
+#: (chromosome, first gene, last gene, copy number factor) of the simulated tumour cells, for 400 genes per chromosome
+CN_EVENTS = [(0, 0, 200, 2.0), (2, 100, 400, 0.5), (4, 0, 400, 2.0)]
+
+
+def simulate_copy_number(
+    n_tumour=240, n_normal=160, depth=3000, seed=0, normal_depth=0.5, n_chrom=6, genes=400
+) -> AnnData:
+    """Raw counts of tumour cells with `CN_EVENTS` (positions scaled to `genes` per chromosome) and two normal types."""
+    rng = np.random.default_rng(seed)
+    G = n_chrom * genes
+    mu = rng.lognormal(-1, 1.2, G)
+    cn = np.ones(G)
+    for c, a, b, f in CN_EVENTS:
+        cn[c * genes + a * genes // 400 : c * genes + b * genes // 400] = f
+    n = n_tumour + n_normal
+    tumour = np.r_[np.ones(n_tumour, bool), np.zeros(n_normal, bool)]
+    # two normal cell types, with 5% of their genes 4x up or down
+    programs = np.where(rng.random((3, G)) < 0.05, rng.choice([0.25, 4.0], (3, G)), 1.0)
+    ctype = np.where(tumour, 0, 1 + rng.integers(0, 2, n))
+    lam = mu[None, :] * programs[ctype] * np.where(tumour[:, None], cn[None, :], 1.0)
+    # normal (immune, stromal) cells usually have fewer UMIs than tumour cells (`normal_depth`)
+    lam *= (depth * np.where(tumour, 1.0, normal_depth) * rng.lognormal(0, 0.2, n) / lam.sum(axis=1))[:, None]
+    pos = np.tile(np.arange(genes) * (80_000_000 // genes) + 10_000, n_chrom)
+    var = pd.DataFrame(
+        {"chromosome": np.repeat([f"chr{i + 1}" for i in range(n_chrom)], genes), "start": pos, "end": pos + 5_000},
+        index=[f"g{i}" for i in range(G)],
+    )
+    obs = pd.DataFrame({"truth": np.where(tumour, "tumour", "normal")}, index=[f"c{i}" for i in range(n)])
+    return AnnData(sp.csr_matrix(rng.poisson(lam).astype(np.float32)), obs=obs, var=var)
+
+
+def knn_graph(coords: np.ndarray, k: int = 6) -> sp.csr_matrix:
+    """Binary kNN graph on the coordinates, symmetrised (like squidpy's `spatial_connectivities`)."""
+    _, idx = cKDTree(coords).query(coords, k + 1)
+    n = len(coords)
+    G = sp.csr_matrix((np.ones(n * k), (np.repeat(np.arange(n), k), idx[:, 1:].ravel())), shape=(n, n))
+    return ((G + G.T) > 0).astype(np.float64).tocsr()

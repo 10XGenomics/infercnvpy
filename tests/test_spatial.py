@@ -8,19 +8,11 @@ import scanpy as sc
 import scipy.sparse as sp
 from anndata import AnnData
 from matplotlib import pyplot as plt
-from scipy.spatial import cKDTree
 
 import infercnvpy as cnv
 from infercnvpy.pl._spatial import _region_columns
 from infercnvpy.tl._spatial import _hop_csr, _hop_dense
-
-
-def _knn_graph(coords: np.ndarray, k: int = 6) -> sp.csr_matrix:
-    """Binary kNN graph on the coordinates, symmetrised (like squidpy's `spatial_connectivities`)."""
-    _, idx = cKDTree(coords).query(coords, k + 1)
-    n = len(coords)
-    G = sp.csr_matrix((np.ones(n * k), (np.repeat(np.arange(n), k), idx[:, 1:].ravel())), shape=(n, n))
-    return ((G + G.T) > 0).astype(np.float64).tocsr()
+from tests.conftest import knn_graph as _knn_graph
 
 
 def _reference(G: sp.csr_matrix, X, alpha, n_hops):

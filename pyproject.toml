@@ -35,7 +35,6 @@ dependencies = [
   "pooch>=1.8",
   "pybiomart>=0.2",
   "pycairo>=1.20; sys_platform=='win32'",
-  "rdata>=1",                             # MIT; reads SCEVAN .RData files
   "scanpy>=1.11,<1.13",
   "scipy>=1.15",
   # the shared `scverse` logger and the example dataset registry
@@ -43,9 +42,9 @@ dependencies = [
   # for debug logging (referenced from the issue template)
   "session-info2>=0.2",
 ]
-optional-dependencies.copykat = [ "rpy2" ]
 optional-dependencies.dask = [ "anndata[dask,lazy]" ]  # dask arrays, and anndata.experimental.read_lazy
 optional-dependencies.gtf = [ "gtfparse>=3" ]
+optional-dependencies.scevan = [ "rdata>=1" ]  # MIT; reads SCEVAN .RData files
 optional-dependencies.spatial = [ "squidpy>=1.8.4" ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Changelog = "https://github.com/scverse/infercnvpy/releases"
@@ -102,10 +101,9 @@ envs.hatch-check-fmt.scripts.format-check = "echo 'try `hatch check fmt --fix`';
 envs.hatch-check-fmt.scripts.format-fix = "prek run -a --group=format --no-group=typecheck"
 envs.hatch-check-types.scripts.check = [ "mypy" ]
 envs.hatch-check-types.dependency-groups = [ "typecheck", "test" ]
-# Install the `gtf` extra so `tests/test_io.py::test_get_genomic_position_from_gtf` can run.
-# The `copykat` extra (rpy2 + R) is intentionally omitted: `test_copykat` is skipped on CI
-# and both rpy2 and gtfparse are imported lazily, so the base import works without them.
-envs.hatch-test.features = [ "gtf" ]
+# The `gtf` and `scevan` extras let `tests/test_io.py` run `genomic_position_from_gtf` and `read_scevan`.
+# Both are imported lazily, so the base import works without them.
+envs.hatch-test.features = [ "gtf", "scevan" ]
 envs.hatch-test.matrix = [
   # Test the lowest and highest supported Python versions with normal deps
   { deps = [ "stable" ], python = [ "3.13", "3.14" ] },
@@ -171,7 +169,7 @@ overrides = [
     "mpl_toolkits.*",
     "numba.*",
     "pooch.*",
-    "rpy2.*",
+    "rdata.*",
     "scanpy.*",
     "scipy.*"
   ], ignore_missing_imports = true },

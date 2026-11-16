@@ -12,8 +12,12 @@ from infercnvpy._util import _copy_for_inplace_false, _deprecated_positional
 
 def _read_rdata_frame(path: Path, name: str) -> pd.DataFrame:
     """Read object `name` from an `.RData` file as a DataFrame (keeping row/column names)."""
-    import rdata  # imported here, so that `import infercnvpy` does not load it
-
+    try:
+        import rdata  # imported here, so that `import infercnvpy` does not load it
+    except ImportError:
+        raise ImportError(
+            'read_scevan needs the optional dependency rdata. Install it with `pip install "infercnvpy[scevan]"`.'
+        ) from None
     obj = rdata.read_rda(path, default_encoding="utf-8")[name]
     if isinstance(obj, pd.DataFrame):
         return obj

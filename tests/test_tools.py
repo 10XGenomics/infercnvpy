@@ -185,14 +185,6 @@ def test_infercnv_manual_reference(adata_oligodendroma):
     cnv.tl.infercnv(adata_oligodendroma, reference=np.ones(adata_oligodendroma.shape[1]))
 
 
-@pytest.mark.skip(
-    reason="rpy2 segfaults on the CI. I don't know why and don't have the time for a painful debugging session."
-)
-def test_copykat(adata_oligodendroma):
-    sc.pp.subsample(adata_oligodendroma, n_obs=50)
-    cnv.tl.copykat(adata_oligodendroma)
-
-
 def test_workflow(adata_oligodendroma):
     cnv.tl.infercnv(adata_oligodendroma)
     cnv.tl.pca(adata_oligodendroma)
@@ -352,19 +344,3 @@ def test_positional_arguments_from_0_6_still_work(adata_cnv_neighbors):
     assert "X_ts" in adata.obsm
     with pytest.raises(TypeError, match="positional arguments"):
         cnv.pp.neighbors(adata, "cnv_pca", "nb", True, "extra")
-
-
-def test_copykat_accepts_0_6_positional_arguments():
-    """copykat needs rpy2 and R (not installed for the tests): check that the positional arguments get through."""
-    import inspect
-
-    import infercnvpy.tl._copykat as ck
-
-    names = list(inspect.signature(ck.copykat).parameters)[1:]
-    assert names[:3] == ["gene_ids", "organism", "segmentation_cut"]
-    import importlib.util
-
-    if importlib.util.find_spec("rpy2") is not None:
-        pytest.skip("with rpy2 installed, copykat would run R")
-    with pytest.warns(FutureWarning, match="`gene_ids`, `organism`"), pytest.raises(ImportError, match="rpy2"):
-        cnv.tl.copykat(sc.AnnData(np.ones((2, 2))), "S", "human")

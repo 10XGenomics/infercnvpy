@@ -45,21 +45,6 @@ pip install infercnvpy
 pip install git+https://github.com/scverse/infercnvpy.git@main
 ```
 
-To (optionally) run the `copyKAT` algorithm, you need a working R installation
-and the [copykat][] package installed. Usually, if `R` is in your `PATH`, [`rpy2`][rpy2] automatically
-detects your R installation. If you get an error message while importing `infercnvpy`,
-try setting the `R_HOME` environment variable before importing infercnvpy:
-
-```python
-import os
-
-os.environ["R_HOME"] = "/usr/lib/R"
-import infercnvpy
-```
-
-[copykat]: https://github.com/navinlabcode/copykat#step-1-installation
-[rpy2]: https://rpy2.github.io/
-
 ## Release notes
 
 See the [release notes on GitHub][changelog].

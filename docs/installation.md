@@ -57,26 +57,15 @@ uv add git+https://github.com/scverse/infercnvpy.git
 
 - `infercnvpy[dask]` installs dask and the lazy readers of anndata (`anndata[dask,lazy]`) for {doc}`large and lazy datasets <large_data>`.
 - `infercnvpy[gtf]` installs [gtfparse][] for {func}`infercnvpy.io.genomic_position_from_gtf`.
+- `infercnvpy[scevan]` installs [rdata][] for {func}`infercnvpy.io.read_scevan`.
 - `infercnvpy[spatial]` installs [squidpy][] for the spatial neighbor graph that {func}`infercnvpy.tl.smooth_cnv`,
   {func}`infercnvpy.tl.spatial_regions` and {func}`infercnvpy.pl.spatial_cnv` read from `adata.obsp`.
   The functions themselves work with any graph in `adata.obsp`, so squidpy is only needed to build it.
-- `infercnvpy[copykat]` installs [rpy2][] for {func}`infercnvpy.tl.copykat`.
-  It also needs a working R installation with the [copykat][] package.
-  Usually, if `R` is in your `PATH`, rpy2 finds your R installation.
-  If importing rpy2 fails, set the `R_HOME` environment variable before importing infercnvpy:
-
-  ```python
-  import os
-
-  os.environ["R_HOME"] = "/usr/lib/R"
-  import infercnvpy
-  ```
 
 To work on infercnvpy itself, see {doc}`contributing`.
 
 [uv]: https://docs.astral.sh/uv/
 [pypi]: https://pypi.org/project/infercnvpy
 [gtfparse]: https://github.com/openvax/gtfparse
-[rpy2]: https://rpy2.github.io/
-[copykat]: https://github.com/navinlabcode/copykat#step-1-installation
+[rdata]: https://github.com/vnmabus/rdata
 [squidpy]: https://squidpy.readthedocs.io

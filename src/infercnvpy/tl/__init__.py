@@ -7,14 +7,14 @@ from anndata import AnnData
 from infercnvpy._logging import log
 from infercnvpy._util import _copy_for_inplace_false, _deprecated_positional
 
-from ._copykat import copykat
+from ._copy_number import copy_number
 from ._infercnv import infercnv
 from ._scores import cnv_score, ithcna, ithgex
 from ._spatial import smooth_cnv, spatial_regions
 
 __all__ = [
     "cnv_score",
-    "copykat",
+    "copy_number",
     "infercnv",
     "ithcna",
     "ithgex",

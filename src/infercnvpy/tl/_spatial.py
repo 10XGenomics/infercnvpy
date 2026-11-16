@@ -127,10 +127,27 @@ def _graph(adata: AnnData, connectivity_key: str) -> sp.csr_matrix:
             '(install with `pip install "infercnvpy[spatial]"`).'
         )
     G = adata.obsp[connectivity_key]
-    G = sp.csr_matrix(G) if sp.issparse(G) else sp.csr_matrix(np.asarray(G))
+    G = sp.csr_matrix(G, copy=True) if sp.issparse(G) else sp.csr_matrix(np.asarray(G))
     if (G.data < 0).any():
         raise ValueError(f"`adata.obsp[{connectivity_key!r}]` must have non-negative weights.")
+    G.eliminate_zeros()  # stored zeros are not neighbors
     return G
+
+
+def _smooth(G: sp.csr_matrix, X, alpha: float | None, n_hops: int, dtype=np.float32) -> np.ndarray:
+    """`n_hops` smoothing steps of `X` (dense or sparse) over the graph `G`, see the module docstring."""
+    graph = (G.indptr, G.indices, G.data.astype(np.float64, copy=False), -1.0 if alpha is None else float(alpha))
+    out = np.empty(X.shape, dtype=dtype)
+    if sp.issparse(X):
+        X = sp.csr_matrix(X)
+        _hop_csr(*graph, X.indptr, X.indices, X.data, out)
+    else:
+        _hop_dense(*graph, np.ascontiguousarray(X), out)
+    buf = np.empty_like(out)
+    for _ in range(n_hops - 1):
+        _hop_dense(*graph, out, buf)
+        out, buf = buf, out
+    return out
 
 
 def smooth_cnv(
@@ -226,22 +243,10 @@ def smooth_cnv(
     if G.shape != (X.shape[0], X.shape[0]):
         raise ValueError(f"`adata.obsp[{connectivity_key!r}]` has shape {G.shape}, expected {(X.shape[0],) * 2}.")
 
-    a = -1.0 if alpha is None else float(alpha)
-    graph = (G.indptr, G.indices, G.data.astype(np.float64, copy=False), a)
     start = log.debug("smooth_cnv: %d cells x %d windows, %d hops", X.shape[0], X.shape[1], n_hops)
     with numba_threads(n_jobs):
-        out = np.empty(X.shape, dtype=np.float32)
-        if sp.issparse(X):
-            X = sp.csr_matrix(X)
-            _hop_csr(*graph, X.indptr, X.indices, X.data, out)
-        else:
-            _hop_dense(*graph, np.ascontiguousarray(X), out)
-        if n_hops > 1:
-            buf = np.empty_like(out)
-            for _ in range(n_hops - 1):
-                _hop_dense(*graph, out, buf)
-                out, buf = buf, out
-    n_isolated = int(np.count_nonzero(np.diff(G.indptr) == 0))
+        out = _smooth(G, X, alpha, n_hops)
+    n_isolated = int(np.count_nonzero(np.diff(G.indptr) - (G.diagonal() != 0) == 0))
     log_result(
         "smooth_cnv",
         "smoothed %d cells over %d hops" + (", %d cells without neighbors kept their values" if n_isolated else ""),
