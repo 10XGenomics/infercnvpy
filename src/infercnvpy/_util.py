@@ -19,10 +19,13 @@ def _as_matrix(x, what: str = "the expression matrix", *, lazy: bool = False):
 
     With `lazy`, also accept a dask array or a backed (on-disk) matrix, see `_is_dask` and `_is_backed`. Without it,
     such a matrix raises an error that tells the user how to load it. A DataFrame (as obsm allows) gives its values.
+    float16 (which scipy.sparse and the kernels reject) becomes float32.
     """
     if isinstance(x, pd.DataFrame):
-        return x.to_numpy()
-    if isinstance(x, np.ndarray) or sp.issparse(x) or (lazy and (_is_dask(x) or _is_backed(x))):
+        x = x.to_numpy()
+    if isinstance(x, np.ndarray) or (lazy and _is_dask(x)):
+        return x.astype(np.float32) if x.dtype == np.float16 else x
+    if sp.issparse(x) or (lazy and _is_backed(x)):
         return x
     if _is_dask(x) or _is_backed(x):
         kind = "a dask array" if _is_dask(x) else "a backed (on-disk) matrix"

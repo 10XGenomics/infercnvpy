@@ -10,6 +10,7 @@ import scipy.sparse as sp
 
 import infercnvpy as cnv
 from infercnvpy.tl._infercnv import _get_reference
+from tests.conftest import knn_graph, simulate_copy_number
 
 
 def test_get_reference_key_and_cat(adata_mock):
@@ -349,3 +350,23 @@ def test_positional_arguments_from_0_6_still_work(adata_cnv_neighbors):
 def test_copykat_stub(adata_mock):
     with pytest.raises(NotImplementedError, match=r"tl\.copy_number"):
         cnv.tl.copykat(adata_mock)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        lambda a: cnv.tl.copy_number(a, min_genes=5, n_restarts=1, n_jobs=1, inplace=False),
+        lambda a: cnv.tl.detectability(a, inplace=False),
+        lambda a: cnv.tl.smooth_cnv(a, inplace=False),
+    ],
+    ids=["copy_number", "detectability", "smooth_cnv"],
+)
+def test_float16_input(run):
+    """A float16 X (as in `datasets.maynard2020_3k`), which scipy.sparse rejects, is read as float32."""
+    adata = simulate_copy_number(n_tumour=60, n_normal=60, genes=100, depth=800)
+    adata.X = adata.X.toarray().astype(np.float16)
+    adata.obsm["X_cnv"] = adata.X[:, :50]
+    adata.obsp["spatial_connectivities"] = knn_graph(np.random.default_rng(0).random((adata.n_obs, 2)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        run(adata)
