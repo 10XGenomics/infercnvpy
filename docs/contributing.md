@@ -183,7 +183,9 @@ infercnvpy logs through `infercnvpy._logging.log`, the `scverse.infercnvpy` logg
   The fix goes in `deep=`, which shows only when the verbosity is more detailed than the line's level.
 - A function logs at most one info line, with its result.
   `infercnvpy._logging.log_result` writes it, and logs it as a warning instead when half or more of the input was dropped.
-  Progress and per-item detail go to debug.
+  Per-item detail goes to debug.
+- Long-running functions can show a `tqdm.auto` progress bar with a `show_progress=True` parameter (as {func}`~infercnvpy.tl.copy_number` does).
+  The bar is updated between steps only, never inside numba kernels, and while it shows, the log handlers write with the bars cleared (`tqdm.external_write_mode`), so that a message gets a line of its own. `tqdm.contrib.logging.logging_redirect_tqdm` isn't enough: it only redirects plain stream handlers, not rich ones.
 
 To test a log message, capture it with `caplog.at_level(logging.INFO, logger="scverse.infercnvpy")`, and test a warning with `pytest.warns`.
 An autouse fixture in `tests/conftest.py` restores the shared verbosity after each test.

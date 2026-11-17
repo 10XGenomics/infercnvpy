@@ -41,6 +41,7 @@ dependencies = [
   "scverse-misc[datasets]>=0.1.8",
   # for debug logging (referenced from the issue template)
   "session-info2>=0.2",
+  "tqdm>=4.66",                           # progress bar of tl.copy_number
 ]
 optional-dependencies.dask = [ "anndata[dask,lazy]" ]  # dask arrays, and anndata.experimental.read_lazy
 optional-dependencies.gtf = [ "gtfparse>=3" ]
@@ -81,6 +82,7 @@ doc = [
 typecheck = [
   "mypy",
   "pandas-stubs",
+  "types-tqdm",
 ]
 
 [tool.hatch]

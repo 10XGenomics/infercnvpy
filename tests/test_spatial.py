@@ -37,7 +37,7 @@ def graph_and_cnv():
     n, m = 300, 40
     G = sp.random(n, n, density=0.03, random_state=1, format="csr") + sp.eye(n)  # weighted, with a diagonal
     G = sp.lil_matrix(G)
-    G[5, :] = 0  # a cell without neighbours
+    G[5, :] = 0  # a cell without neighbors
     X = rng.normal(size=(n, m)) * (rng.random((n, m)) < 0.3)
     return sp.csr_matrix(G), X.astype(np.float32)
 
@@ -53,7 +53,7 @@ def test_smooth_cnv_matches_scipy(graph_and_cnv, fmt, alpha, n_hops):
     res = cnv.tl.smooth_cnv(adata, alpha=alpha, n_hops=n_hops, inplace=False)
     assert res.dtype == np.float32
     np.testing.assert_allclose(res, _reference(G, X, alpha, n_hops), rtol=1e-5, atol=1e-6)
-    np.testing.assert_array_equal(res[5], X[5])  # no neighbours: unchanged
+    np.testing.assert_array_equal(res[5], X[5])  # no neighbors: unchanged
 
 
 def test_serial_twin_matches(graph_and_cnv):
@@ -148,7 +148,7 @@ def test_spatial_regions_probabilities_and_missing():
     p_tumour = np.clip((truth == "tumour") * 0.4 + 0.3 + rng.normal(scale=0.2, size=len(truth)), 0.01, 0.99)
     adata.obsm["p"] = pd.DataFrame({"tumour": p_tumour, "normal": 1 - p_tumour}, index=adata.obs_names)
     calls = np.where(p_tumour > 0.5, "tumour", "normal").astype(object)
-    calls[::7] = np.nan  # missing calls are filled from the probabilities and the neighbours
+    calls[::7] = np.nan  # missing calls are filled from the probabilities and the neighbors
     adata.obs["call"] = pd.Categorical(calls)
     res = cnv.tl.spatial_regions(adata, key="call", probabilities="p", beta=4, inplace=False)
     assert res.notna().all()

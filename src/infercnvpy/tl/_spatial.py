@@ -134,10 +134,10 @@ def _graph(adata: AnnData, connectivity_key: str) -> sp.csr_matrix:
     return G
 
 
-def _smooth(G: sp.csr_matrix, X, alpha: float | None, n_hops: int, dtype=np.float32) -> np.ndarray:
+def _smooth(G: sp.csr_matrix, X, alpha: float | None, n_hops: int) -> np.ndarray:
     """`n_hops` smoothing steps of `X` (dense or sparse) over the graph `G`, see the module docstring."""
     graph = (G.indptr, G.indices, G.data.astype(np.float64, copy=False), -1.0 if alpha is None else float(alpha))
-    out = np.empty(X.shape, dtype=dtype)
+    out = np.empty(X.shape, dtype=np.float32)
     if sp.issparse(X):
         X = sp.csr_matrix(X)
         _hop_csr(*graph, X.indptr, X.indices, X.data, out)
@@ -194,6 +194,21 @@ def smooth_cnv(
     weights works, as long as the weights are similarities or binary connectivities (a larger
     weight means a closer neighbor). Distances, e.g. `obsp["spatial_distances"]`, give the
     farthest neighbors the largest weight and are rejected.
+
+    A normal cell next to a tumor cell shares no copy number change with it, so smoothing over the full graph spreads
+    tumor signal into immune and stromal cells at the tumor edge and dilutes the tumor cells there. When the normal
+    cells are annotated (e.g. the reference cells of :func:`infercnvpy.tl.infercnv`), drop the edges between them and
+    the other cells; entries set to 0 are not edges. Edges among the normal cells stay, so that they are smoothed as
+    much as the other cells and a threshold set on them still fits::
+
+        G = adata.obsp["spatial_connectivities"].tocsr(copy=True)
+        normal = adata.obs["cell_type"].isin(["immune", "endothelial", "fibroblast"]).to_numpy()
+        G.data *= normal[np.repeat(np.arange(G.shape[0]), np.diff(G.indptr))] == normal[G.indices]
+        adata.obsp["spatial_connectivities_masked"] = G
+        cnv.tl.smooth_cnv(adata, connectivity_key="spatial_connectivities_masked")
+
+    Use two groups, normal and the rest, rather than one group per cell type, so that tumor cells annotated as
+    different types still share edges. No mask separates normal cells from tumor cells of the same type.
 
     Parameters
     ----------

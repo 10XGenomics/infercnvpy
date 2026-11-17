@@ -3,6 +3,7 @@
 infercnvpy has no settings object of its own.
 It logs through the `scverse.infercnvpy` logger, which shares its level with the other scverse packages.
 The default level is `"warning"`, so infercnvpy prints only warnings about the data, e.g. when half or more genes have no genomic position.
+Progress bars don't depend on the level: {func}`~infercnvpy.tl.copy_number` shows one unless `show_progress=False`, and tqdm's `TQDM_DISABLE=1` environment variable turns them all off.
 
 To set the level for all scverse packages, use
 
