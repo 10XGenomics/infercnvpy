@@ -2,7 +2,7 @@ import inspect
 import re
 import sys
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import wraps
 from textwrap import dedent, indent
 from typing import Any
@@ -58,6 +58,11 @@ def _as_df(df) -> pd.DataFrame:
     raise TypeError(f"infercnvpy needs `obs` and `var` as pandas DataFrames, got {type(df).__name__}.")
 
 
+def _as_list(x) -> list:
+    """A string as a list of one, any other collection as a list."""
+    return [x] if isinstance(x, str) else list(x)
+
+
 def _obs_column(adata, key: str) -> pd.Series:
     """`adata.obs[key]` as a pandas Series (the `obs` of `anndata.experimental.read_lazy` is a lazy `Dataset2D`)."""
     obs = adata.obs
@@ -79,10 +84,20 @@ def _choose_mtx_rep(adata, use_raw=False, layer=None):
         return adata.X
 
 
+def _listed[T](x: T) -> T | list:
+    """`x` as a list if it is an iterator (e.g. a generator or `map`), so it can be read twice."""
+    return list(x) if isinstance(x, Iterator) else x
+
+
 def _params_for_uns(**params) -> dict:
-    """Prepare call parameters for `adata.uns[...]["params"]`: store list-likes (e.g. a pandas Index) as lists."""
+    """Prepare call parameters for `adata.uns[...]["params"]`: list-likes (e.g. a pandas Index) as lists.
+
+    A random number generator can't be written to h5ad or zarr and is stored as `None`.
+    """
 
     def writable(v):
+        if isinstance(v, np.random.Generator):
+            return None
         if isinstance(v, str | dict) or not pd.api.types.is_list_like(v):
             return v
         return sorted(v) if isinstance(v, set | frozenset) else list(v)

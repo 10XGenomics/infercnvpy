@@ -52,18 +52,29 @@ class _KeyedCacheFile(IndexDataCacheFile):
 
 
 class _KeyedFunctionCache(FunctionCache):
-    def __init__(self, py_func):
+    """numba's function cache with the `njit` options in the key.
+
+    numba's key has the kernel's bytecode but not its compile options, which are set here, in another module.
+    """
+
+    def __init__(self, py_func, options: dict[str, Any]):
         super().__init__(py_func)
+        self._options = repr(sorted(options.items()))
         self._cache_file = _KeyedCacheFile(
             self._cache_path, self._impl.filename_base, self._impl.locator.get_source_stamp()
         )
 
+    def _index_key(self, sig, codegen):
+        return (*super()._index_key(sig, codegen), self._options)
+
 
 def njit(fn: Callable[..., Any], /, **options: Any) -> Any:
     """`numba.njit` with ``nogil=True``, numpy's error model and the disk cache of `_KeyedCacheFile`."""
-    dispatcher = numba.njit(fn, nogil=True, error_model="numpy", **options)
+    options = {"nogil": True, "error_model": "numpy", **options}
+    dispatcher = numba.njit(fn, **options)
     if hasattr(dispatcher, "py_func"):  # with NUMBA_DISABLE_JIT=1, `njit` returns `fn` itself
-        dispatcher._cache = _KeyedFunctionCache(dispatcher.py_func)  # type: ignore[attr-defined]  # what `cache=True` sets
+        # what `cache=True` sets
+        dispatcher._cache = _KeyedFunctionCache(dispatcher.py_func, options)  # type: ignore[attr-defined]
     return dispatcher
 
 

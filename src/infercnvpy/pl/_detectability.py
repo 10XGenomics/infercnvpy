@@ -13,6 +13,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Patch, Rectangle
 
 from infercnvpy.pl._chromosome_heatmap import _figure, _finish
+from infercnvpy.tl._infercnv import _natural_sort
 
 _METRICS = {
     "cells_gain": "cells to detect the gain",
@@ -116,7 +117,7 @@ def detectability(
         raise ValueError("A bar chart shows one condition; select one group and depth, or use `kind='heatmap'`.")
     if kind == "bar" and ideal:
         raise ValueError("The bar chart shows the ideal bound as ticks already; `ideal=True` is for the heatmap.")
-    arms = sorted(set(table["arm"].astype(str)), key=_arm_key)
+    arms = _natural_sort(set(table["arm"].astype(str)))
 
     own = ax is None
     if figsize is None:
@@ -156,12 +157,6 @@ def _conditions(table: pd.DataFrame) -> pd.Series:
         return pd.Series("", index=table.index)
     parts = [table[c].map(lambda d: f"{d:g} counts") if c == "depth" else table[c].astype(str) for c in cols]
     return pd.Series([" | ".join(p) for p in zip(*parts, strict=True)], index=table.index)
-
-
-def _arm_key(arm: str):
-    """Genome order of arm names like "chr1p" (numbered chromosomes first, then by name; p before q)."""
-    name = arm[:-1].removeprefix("chr")
-    return (not name.isdigit(), int(name) if name.isdigit() else 0, name, arm[-1])
 
 
 def _bars(ax: Axes, table: pd.DataFrame, arms: list[str], metric: str, min_genes: int) -> list:

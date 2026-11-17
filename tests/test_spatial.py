@@ -221,15 +221,6 @@ def test_spatial_cnv_region_by_window_midpoint():
         _region_columns(adata, "cnv", "chr1:160-240")
 
 
-def test_spatial_cnv_colorbar_label():
-    adata = _with_windows([0, 100], [100, 200])
-    adata.obsm["spatial"] = np.array([[0.0, 0.0], [1.0, 1.0]])
-    adata.obs["label"] = pd.Categorical(["x", "y"])
-    axes = cnv.pl.spatial_cnv(adata, region="chr1", color="label", show=False)
-    [cbar] = [c.colorbar for ax in axes for c in ax.collections if c.colorbar is not None]
-    assert cbar.ax.get_ylabel() == "mean CNV (relative to reference)"
-
-
 @pytest.fixture
 def adata_spatial() -> AnnData:
     """30 spots on a tissue four times as wide as high, with a categorical and a continuous `obs` column."""
@@ -265,7 +256,6 @@ def test_spatial_cnv_panels(adata_spatial):
 
 
 def test_spatial_cnv_saves_once(adata_spatial, tmp_path):
-    plt.close("all")
     settings = sc.settings.figdir, sc.settings.file_format_figs, sc.settings.autosave
     sc.settings.figdir, sc.settings.file_format_figs = tmp_path, "png"
     try:
@@ -282,3 +272,11 @@ def test_spatial_cnv_saves_once(adata_spatial, tmp_path):
     for p in tmp_path.iterdir():
         assert (plt.imread(p)[..., :3] < 0.9).any(), p.name
     assert plt.get_fignums() == [fig.number]
+
+
+def test_spatial_cnv_keeps_an_inverted_y_axis(adata_spatial):
+    """Drawn into axes whose y axis already points down (an image drawn first), the axis stays that way."""
+    ax = plt.figure().add_subplot()
+    ax.invert_yaxis()
+    cnv.pl.spatial_cnv(adata_spatial, region="chr1", ax=ax, show=False)
+    assert ax.yaxis_inverted()

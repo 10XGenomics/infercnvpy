@@ -126,13 +126,15 @@ def _scanpy_heatmap(
 ) -> dict[str, Axes]:
     """Draw `tmp_adata` with :func:`scanpy.pl.heatmap`, with chromosome annotations.
 
-    The color scale is centered at 0, from `vmin` to `vmax` (default `lo` and `hi`).
+    Without a `norm`, the color scale is centered at `vcenter` (0), from `vmin` to `vmax` (default `lo` and `hi`).
     """
     # re-sort, as saving & loading anndata destroys the order
     chr_pos_dict = dict(sorted(adata.uns[use_rep]["chr_pos"].items(), key=lambda x: x[1]))
     chr_pos = list(chr_pos_dict.values())
-    vmin, vmax = kwargs.pop("vmin", None), kwargs.pop("vmax", None)
-    kwargs["norm"] = TwoSlopeNorm(0, vmin=lo if vmin is None else vmin, vmax=hi if vmax is None else vmax)
+    vmin, vmax, vcenter = (kwargs.pop(k, None) for k in ("vmin", "vmax", "vcenter"))
+    if kwargs.get("norm") is None:
+        kwargs["norm"] = two_slope_norm(0 if vcenter is None else vcenter, lo, hi, vmin, vmax)
+    kwargs.pop("show_gene_labels", None)  # there are too many windows to label
     return_ax_dic = sc.pl.heatmap(
         tmp_adata,
         var_names=tmp_adata.var.index.values,
@@ -148,3 +150,13 @@ def _scanpy_heatmap(
     )
     return_ax_dic["heatmap_ax"].vlines(chr_pos[1:], lw=0.6, ymin=ymin, ymax=tmp_adata.shape[0])
     return return_ax_dic
+
+
+def two_slope_norm(vcenter: float, lo: float, hi: float, vmin: float | None, vmax: float | None) -> TwoSlopeNorm:
+    """`TwoSlopeNorm` at `vcenter` from `vmin` to `vmax`, by default the data range `lo` to `hi` around `vcenter`.
+
+    The data range is widened to hold `vcenter`, as `TwoSlopeNorm` needs `vmin < vcenter < vmax`, e.g. for a matrix of
+    zeros.
+    """
+    lo, hi = min(lo, vcenter - 1e-9), max(hi, vcenter + 1e-9)
+    return TwoSlopeNorm(vcenter, vmin=lo if vmin is None else vmin, vmax=hi if vmax is None else vmax)

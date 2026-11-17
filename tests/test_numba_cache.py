@@ -1,9 +1,6 @@
 """The numba disk cache stays correct when processes compile different signatures of one kernel at the same time."""
 
-import os
-import subprocess
-import sys
-import textwrap
+from tests.conftest import run_python
 
 KERNEL = """
 from infercnvpy._numba import njit_parallel
@@ -60,14 +57,20 @@ assert module.total(np.ones(3)) == 3
 def test_concurrent_compiles_share_the_cache(tmp_path):
     kernels = tmp_path / "kernels.py"
     kernels.write_text(KERNEL)
-    env = {**os.environ, "NUMBA_CACHE_DIR": str(tmp_path / "cache")}
     for script in (RACE, CALL):
-        res = subprocess.run(
-            [sys.executable, "-c", textwrap.dedent(script), str(kernels)],
-            env=env,
-            cwd=tmp_path,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert res.returncode == 0, res.stderr
+        run_python(script, kernels, cwd=tmp_path, NUMBA_CACHE_DIR=str(tmp_path / "cache"))
+
+
+def test_cache_key_holds_the_options():
+    """Kernels compiled with other options (set in `_numba`, not in the kernel's module) don't share cache entries."""
+    from numba import float64
+    from numba.core.registry import cpu_target
+
+    from infercnvpy._numba import _KeyedFunctionCache
+
+    def f(x):
+        return x
+
+    codegen = cpu_target.target_context.codegen()
+    a, b = (_KeyedFunctionCache(f, {"nogil": True, "parallel": p}) for p in (False, True))
+    assert a._index_key((float64,), codegen) != b._index_key((float64,), codegen)

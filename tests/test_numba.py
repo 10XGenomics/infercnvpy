@@ -1,13 +1,9 @@
 """The parallel and serial twins of `njit_parallel`, and running without numba's JIT."""
 
-import os
-import subprocess
-import sys
-import textwrap
-
 import numpy as np
 
 from infercnvpy._numba import njit_parallel, prange
+from tests.conftest import run_python
 
 
 @njit_parallel
@@ -38,12 +34,4 @@ def test_without_jit():
     cnv.tl.infercnv(adata, window_size=4, step=2)
     assert adata.obsm["X_cnv"].shape == (6, 5)
     """
-    env = {**os.environ, "NUMBA_DISABLE_JIT": "1"}
-    res = subprocess.run(
-        [sys.executable, "-W", "ignore", "-c", textwrap.dedent(script)],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert res.returncode == 0, res.stderr
+    run_python(script, NUMBA_DISABLE_JIT="1")

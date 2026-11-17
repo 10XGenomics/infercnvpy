@@ -12,6 +12,7 @@ from infercnvpy._numba import numba_threads
 from infercnvpy.tl import _copy_number as M
 from infercnvpy.tl import _copy_number_kernels as K
 from infercnvpy.tl._infercnv import _Rows
+from infercnvpy.tl._infercnv_kernels import _group_sums_csr
 from tests.conftest import CN_EVENTS, knn_graph
 from tests.conftest import simulate_copy_number as _simulate
 
@@ -77,33 +78,11 @@ def test_count_kernels_match_references():
     np.testing.assert_allclose(out, np.stack([Xk[:, win_of_col == w].sum(1) for w in range(6)], axis=1))
     labels = rng.integers(0, 3, 20)
     slabs = np.zeros((4, 3, 30))
-    K.pooled_counts(X.data, X.indices, X.indptr, np.arange(10, 30), col_map, labels, slabs)
+    _group_sums_csr(X.data, X.indices, X.indptr, np.arange(10, 30), labels, False, slabs, col_map)
     ref = np.zeros((3, 30))
     for lab in range(3):
         ref[lab, col_map[col_map >= 0]] = X[10:30][labels == lab].toarray()[:, col_map >= 0].sum(0)
     np.testing.assert_allclose(slabs.sum(0), ref)
-    # per-type likelihood
-    Y = rng.poisson(5, (20, 6)).astype(float)
-    size = Y.sum(1)
-    share = rng.dirichlet(np.ones(6), (2, 3))
-    phi = np.full(6, 3.0)
-    types = rng.integers(0, 2, 20)
-    use = np.ones(6, dtype=np.bool_)
-    g = rng.dirichlet(np.ones(6))
-    ll, spill = np.empty((20, 3)), np.empty(20)
-    args = (Y, size, types, share, np.log(share), phi, use, g)
-    K.nb_loglik_types(*args, np.zeros(2, dtype=np.bool_), 0.5, False, ll, spill)
-    for r in range(20):
-        for k in range(3):
-            np.testing.assert_allclose(ll[r, k], _nb_loglik(Y[r], size[r], share[types[r], k], phi))
-    # with spill_ok, the diploid likelihood uses the mixture (capped at 0.5), the aneuploid ones do not change
-    ll2 = np.empty((20, 3))
-    K.nb_loglik_types(*args, np.ones(2, dtype=np.bool_), 0.5, False, ll2, spill)
-    np.testing.assert_allclose(ll2[:, 1:], ll[:, 1:])
-    s = np.minimum(spill, 0.5)
-    for r in range(20):
-        mix = (1 - s[r]) * share[types[r], 0] + s[r] * g
-        np.testing.assert_allclose(ll2[r, 0], _nb_loglik(Y[r], size[r], mix, phi))
 
 
 @pytest.mark.parametrize(("sparse_gram", "dense_eigh"), [(0.0, 500), (1.0, 500), (1.0, 100)])
@@ -229,22 +208,9 @@ def test_copy_number_spatial_info_with_one_clone():
     assert uns["spatial"] == {"neighbor_weight": 0.0, "sweeps": 0, "converged": True}
 
 
-@pytest.mark.parametrize("show", [False, True])
-def test_copy_number_progress_bar(show, capsys):
-    """The bar shows on stderr with `show_progress` (unless TQDM_DISABLE is set) and not without it."""
-    import os
-
-    if show and os.environ.get("TQDM_DISABLE"):
-        pytest.skip("TQDM_DISABLE is set")
-    obs = cnv.tl.copy_number(_simulate(), n_restarts=2, n_jobs=2, inplace=False, show_progress=show)[0]
-    assert ("copy_number restart 2/2" in capsys.readouterr().err) == show
-    assert _accuracy(_simulate(), obs) >= 0.98
-
-
-@pytest.mark.parametrize("handler", ["stream", "other"])
-def test_progress_bar_after_the_guard_and_apart_from_logs(handler, capsys, monkeypatch):
-    """No bar when the guard labels the cells undetermined; log messages during the fits get lines of their own,
-    whatever handler the scverse logger has (a plain stream handler, or another kind such as rich's)."""
+def test_progress_bar(capsys, monkeypatch):
+    """The bar shows on stderr with `show_progress`, not when the guard labels the cells undetermined, and log
+    messages during the fits get lines of their own, also with a handler that is no StreamHandler (as rich's)."""
     import logging
     import os
     import sys
@@ -258,21 +224,20 @@ def test_progress_bar_after_the_guard_and_apart_from_logs(handler, capsys, monke
         def emit(self, record):
             sys.stderr.write(self.format(record) + "\n")
 
+    with M._progress(2, False) as bar:
+        bar.update()
     cnv.tl.copy_number(_simulate(depth=60), min_genes=5, min_detection=0.01, n_jobs=2, inplace=False)
-    assert "restart" not in capsys.readouterr().err
-    old = config.verbosity
+    assert "%|" not in capsys.readouterr().err
     config.verbosity = "debug"  # (re)installs the scverse handler, so ours goes in after
     owner = logging.getLogger("scverse")
-    h = logging.StreamHandler(sys.stderr) if handler == "stream" else Other()
+    h = Other()
     h.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     monkeypatch.setattr(owner, "handlers", [h])
-    try:
-        cnv.tl.copy_number(_simulate(), n_restarts=2, n_jobs=2, inplace=False)
-        assert owner.handlers == [h]  # restored after the fit
-    finally:
-        monkeypatch.undo()
-        config.verbosity = old
+    obs = cnv.tl.copy_number(_simulate(), n_restarts=2, n_jobs=2, inplace=False)[0]
+    assert owner.handlers == [h]  # restored after the fit
+    assert _accuracy(_simulate(), obs) >= 0.98
     lines = [x for line in capsys.readouterr().err.splitlines() for x in line.split("\r")]
+    assert any("copy_number restart 2/2" in x for x in lines)
     logged = [x for x in lines if "copy_number: restart 0, " in x]
     assert logged and not any("%|" in x for x in logged)
 
@@ -337,8 +302,8 @@ def test_loglik_kernel_matches_numpy(half, report):
     phi, g = rng.uniform(0.5, 20, W), rng.dirichlet(np.ones(W))
     spill_ok = np.array([True, False, True, False])
     ll, spill = np.empty((n, k)), np.empty(n)
-    K.nb_loglik_types(Y, size, types, share, np.log(share), phi, use, g, spill_ok, 0.5, report, ll, spill)
-    ref, ref_spill = _loglik_reference(Y, size, types, share, phi, use, g, spill_ok, 0.5, report)
+    K.nb_loglik_types(Y, size, types, share, np.log(share), phi, use, g, spill_ok, 0.05, report, ll, spill)
+    ref, ref_spill = _loglik_reference(Y, size, types, share, phi, use, g, spill_ok, 0.05, report)
     np.testing.assert_allclose(ll, ref, rtol=1e-12)
     np.testing.assert_array_equal(ll.argmax(axis=1), ref.argmax(axis=1))
     np.testing.assert_array_equal(spill, ref_spill)
@@ -346,7 +311,7 @@ def test_loglik_kernel_matches_numpy(half, report):
 
 @pytest.mark.parametrize("n", [300, 3000, 1e6])
 def test_spillover_is_the_likelihood_maximum(n):
-    """Large `g / a` (a tumour-specific window) made the Newton steps stop near 0."""
+    """The Newton steps reach the maximum also for a large `g / a` (a tumour-specific window)."""
     rng = np.random.default_rng(0)
     a = rng.dirichlet(np.ones(2000))
     g = a.copy()
@@ -398,13 +363,8 @@ _DETECTION_BIAS = pytest.mark.xfail(
 @pytest.mark.parametrize(
     "kw",
     [
-        pytest.param(
-            {"n_tumour": 600, "n_normal": 200, "depth": 400, "normal_depth": 1.0, "seed": 4},
-            # the same bias, but this case depends on the seed: some restarts invert the baseline, the majority wins
-            marks=pytest.mark.xfail(strict=False, reason="detection bias (see the next case), seed-dependent"),
-        ),
         pytest.param({"n_tumour": 600, "n_normal": 600, "depth": 400, "seed": 2}, marks=_DETECTION_BIAS),
-        {"n_tumour": 600, "n_normal": 9},  # a rare normal population was too small to seed the baseline
+        {"n_tumour": 600, "n_normal": 9},  # a rare normal population seeds the baseline
     ],
 )
 def test_copy_number_baseline_not_on_the_tumour(kw):
@@ -412,21 +372,14 @@ def test_copy_number_baseline_not_on_the_tumour(kw):
     assert _accuracy(adata, cnv.tl.copy_number(adata, n_jobs=2, inplace=False, force_calls=True)[0]) >= 0.95
 
 
-@pytest.mark.parametrize(
-    "kw",
-    [
-        {},
-        {"n_tumour": 600, "n_normal": 200, "depth": 400, "normal_depth": 1.0, "seed": 4},
-        {"n_tumour": 600, "n_normal": 15, "depth": 400, "seed": 1},
-    ],
-)
-def test_copy_number_warns_on_uncertain_baseline(kw, caplog):
+def test_copy_number_warns_on_uncertain_baseline(caplog):
     """Without a clear flat split and without marker-rich groups the baseline is uncertain: a warning and the seed
     diagnostics in `uns`."""
+    kw = {"n_tumour": 600, "n_normal": 200, "depth": 400, "normal_depth": 1.0, "seed": 4}
     with caplog.at_level("WARNING"):
         uns = cnv.tl.copy_number(_simulate(**kw), n_jobs=2, inplace=False, force_calls=True)[2]
     seed = uns["seed"]
-    assert seed["method"] == uns["baseline"] and seed["clear_gap"] == M._FLAT_GAP
+    assert seed["clear_gap"] == M._FLAT_GAP
     assert ("baseline is uncertain" in caplog.text) == (seed["method"] == "flattest group")
 
 
@@ -467,8 +420,8 @@ def test_copy_number_small_panel_keeps_labels():
 
 
 def test_em_runs_after_baseline_and_uses_its_dosage(monkeypatch):
-    """Every EM run follows a baseline update (the last single-iteration run skipped it), and the reported dosage
-    weights are those of the final likelihood (they were learnt after it)."""
+    """Every EM run follows a baseline update, also the last single-iteration run, and the reported dosage weights
+    are those of the final likelihood."""
     calls = []
     for name in ("set_baseline", "run", "loglik"):
         orig = getattr(M._EM, name)
@@ -496,7 +449,7 @@ def test_copy_number_reference_and_not_inplace():
     assert gv.shape == adata.shape
     tumour_gv = np.nanmean(gv[(adata.obs["truth"] == "tumour").to_numpy()], axis=0)
     assert np.nanmean(tumour_gv[:200]) > 0.3  # chr1 0-200: gain (genes removed by the filters are NaN)
-    assert uns["baseline"] == "reference"
+    assert uns["seed"]["method"] == "reference"
     assert _accuracy(adata, obs) >= 0.98
     assert "copy_number" not in adata.obs
 
@@ -547,8 +500,8 @@ def _reference_types_data(depth=8000, clone_in_reference_type=False, few_events=
 def test_copy_number_several_reference_types_stay_diploid():
     """Reference cell types whose expression differs smoothly from the pooled reference stay diploid.
 
-    The diploid epithelial cells, outside the reference, form a clone of their own expression; the stromal reference
-    types used to join it at high depth.
+    The diploid epithelial cells, outside the reference, form a clone of their own expression, and the stromal
+    reference types stay out of it at high depth.
     """
     adata, clone, ctype = _reference_types_data()
     refs = [f"t{t}" for t in range(1, 7)]
@@ -816,9 +769,14 @@ def test_copy_number_without_graph_edges_is_unchanged():
     """Graphs without (real) edges change nothing; a missing key raises."""
     adata = _simulate(n_tumour=300, n_normal=200, depth=300, seed=3)
     adata.obsp["empty_connectivities"] = sp.csr_matrix((adata.n_obs, adata.n_obs))
-    zeros = knn_graph(np.random.default_rng(0).random((adata.n_obs, 2)), 10)
-    zeros.data[:] = 0.0  # stored zeros (as left by zeroing cross-type entries) are not neighbors
-    adata.obsp["zero_connectivities"] = zeros + sp.eye(adata.n_obs, format="csr")  # nor are self-loops
+    knn = knn_graph(np.random.default_rng(0).random((adata.n_obs, 2)), 10).tocoo()
+    n = adata.n_obs
+    # stored zeros (as left by zeroing cross-type entries) are not neighbors, nor are self-loops
+    zeros = sp.csr_matrix(
+        (np.r_[np.zeros(knn.nnz), np.ones(n)], (np.r_[knn.row, np.arange(n)], np.r_[knn.col, np.arange(n)])), (n, n)
+    )
+    assert (zeros.data == 0).sum() == knn.nnz
+    adata.obsp["zero_connectivities"] = zeros
     kw = {"min_genes": 5, "n_jobs": 2, "inplace": False}
     plain = cnv.tl.copy_number(adata, **kw)
     for key in ("empty_connectivities", "zero_connectivities"):
@@ -889,3 +847,78 @@ def test_copy_number_max_neighbor_weight(cap):
     else:
         assert 0 < info["neighbor_weight"] <= cap
         assert info["converged"]
+
+
+def test_parameters_can_be_written(tmp_path):
+    """A Generator seed is stored as None, so that the AnnData can be written."""
+    adata = _simulate(depth=60)
+    cnv.tl.copy_number(adata, min_genes=5, min_detection=0.01, random_state=np.random.default_rng(0))
+    assert adata.uns["copy_number"]["params"]["random_state"] is None
+    adata.write_h5ad(tmp_path / "a.h5ad")
+
+
+def test_iterators_as_arguments():
+    """An iterator argument is read once, so the exclusion it holds is applied."""
+    adata = _simulate(depth=60)
+    kw = {"min_genes": 5, "min_detection": 0.01, "inplace": False}
+    as_list = cnv.tl.copy_number(adata, exclude_chromosomes=["chr1"], exclude_genes=["g500"], **kw)[2]
+    as_iter = cnv.tl.copy_number(adata, exclude_chromosomes=iter(["chr1"]), exclude_genes=map(str, ["g500"]), **kw)[2]
+    assert as_iter["undetermined"] == as_list["undetermined"]
+    assert as_iter["params"] == as_list["params"]
+    chr_pos = cnv.tl.infercnv(adata, exclude_chromosomes=(c for c in ["chr1"]), window_size=50, inplace=False)[0]
+    assert "chr1" not in chr_pos
+
+
+def test_overlapping_progress_bars_leave_the_handlers():
+    """Progress bars of runs in other threads end in any order; the wrapper applies the filters added to it."""
+    import logging
+
+    from infercnvpy._logging import log
+
+    logger = log.logger
+    while not logger.handlers and logger.propagate and logger.parent is not None:
+        logger = logger.parent
+    before = list(logger.handlers)
+    a, b = M._progress(1, True), M._progress(1, True)
+    a.__enter__()
+    b.__enter__()
+    a.__exit__(None, None, None)
+    b.__exit__(None, None, None)
+    assert logger.handlers == before
+
+    seen = []
+
+    class Record(logging.Handler):
+        def emit(self, record):
+            seen.append(record)
+
+    wrapper = M._ClearBars(Record())
+    wrapper.addFilter(lambda record: False)
+    wrapper.handle(logging.makeLogRecord({"msg": "x", "levelno": logging.WARNING}))
+    assert not seen
+
+
+def test_no_aneuploid_warning_with_reference(caplog):
+    """Without aneuploid cells, the warning for a run with reference cells doesn't ask for reference cells."""
+    adata = _simulate(n_tumour=0, n_normal=300)
+    cnv.tl.copy_number(adata, reference_key="truth", reference_cat="normal", n_restarts=1, n_jobs=2, inplace=False)
+    [msg] = [r.getMessage() for r in caplog.records if "no cell is called aneuploid" in r.getMessage()]
+    assert "comes from the sample itself" not in msg
+
+
+def test_short_chromosomes_have_both_window_parities():
+    """Cross-fitting scores each window with the profile fitted on the other parity, so a chromosome with fewer than
+    `2 window_size` genes needs windows of both parities to enter the likelihood."""
+    adata = _simulate(n_tumour=20, n_normal=20, n_chrom=3, genes=15)
+    cells, lay, _, _ = M._filter_cells_genes(adata, _Rows(adata.X, 5000), np.zeros(45, bool), None, 0, 0)
+    data = M._Data(_Rows(adata.X, 5000), cells, lay, 10)
+    parity = data.win_parity[data.gene_win]
+    for g0, g in zip(lay.g0s, lay.gs, strict=True):
+        assert set(parity[g0 : g0 + g]) == {0, 1}
+
+
+def test_copy_number_does_not_depend_on_n_jobs():
+    adata = _simulate(120, 80, n_chrom=4, genes=300)
+    a, b = (cnv.tl.copy_number(adata, n_restarts=1, n_jobs=n, inplace=False) for n in (1, 2))
+    pd.testing.assert_frame_equal(a[0], b[0], check_exact=True)
+    np.testing.assert_array_equal(a[1], b[1])

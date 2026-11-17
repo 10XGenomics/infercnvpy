@@ -100,7 +100,7 @@ def spatial_cnv(
     panels = res if isinstance(res, list) else [res]
     for ax in panels:
         ax.set_aspect("equal")
-        ax.invert_yaxis()
+        ax.yaxis.set_inverted(True)
     for ax in panels[: len(regions)]:
         for points in ax.collections:
             if points.colorbar is not None:

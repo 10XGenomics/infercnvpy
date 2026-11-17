@@ -322,10 +322,11 @@ def _gene_values(out, g0s, gs, Ks, w0s, first, n_in, cols, thr, centre, gv, n_ch
 
 
 @njit_parallel
-def _group_sums_csr(data, indices, indptr, rows, groups, expm1, sums):
+def _group_sums_csr(data, indices, indptr, rows, groups, expm1, sums, col_map=None):
     """`sums[t, groups[i]] += X[rows[i]]` for the CSR matrix `X`, where `t` is the chunk of `i` (one per `sums[t]`).
 
-    With `expm1`, the sums are of `expm1(X)` (the counts behind log-normalized values; implicit zeros stay 0).
+    With `expm1`, the sums are of `expm1(X)` (the counts behind log-normalized values; implicit zeros stay 0). With
+    `col_map`, column `j` of `X` adds to column `col_map[j]` of the sums, and not at all where that is negative.
     """
     n_chunks = sums.shape[0]
     n = rows.size
@@ -335,8 +336,10 @@ def _group_sums_csr(data, indices, indptr, rows, groups, expm1, sums):
             s = st[groups[i]]
             r = rows[i]
             for k in range(indptr[r], indptr[r + 1]):
-                v = np.float64(data[k])
-                s[indices[k]] += np.expm1(v) if expm1 else v
+                j = indices[k] if col_map is None else col_map[indices[k]]
+                if j >= 0:
+                    v = np.float64(data[k])
+                    s[j] += np.expm1(v) if expm1 else v
 
 
 @njit_parallel

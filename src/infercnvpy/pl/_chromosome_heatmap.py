@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, fields
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -12,7 +13,7 @@ from anndata import AnnData
 from matplotlib import patches
 from matplotlib import pyplot as plt
 from matplotlib.artist import Artist
-from matplotlib.colors import BoundaryNorm, Colormap, ListedColormap, Normalize, TwoSlopeNorm
+from matplotlib.colors import BoundaryNorm, Colormap, ListedColormap, Normalize
 from matplotlib.path import Path as MplPath
 from matplotlib.text import Text
 from matplotlib.ticker import FixedFormatter
@@ -22,8 +23,9 @@ from mpl_toolkits.axes_grid1.axes_size import Fixed
 from infercnvpy._logging import SKIP_OWN_FRAMES
 from infercnvpy._numba import n_kernel_chunks, numba_threads
 from infercnvpy._util import _as_matrix, _is_backed, _is_dask, _obs_column, _splice_doc
-from infercnvpy.pl._chromosome_heatmap_legacy import legacy_heatmap, legacy_summary
-from infercnvpy.pl._heatmap_kernels import binned_sums, column_ranges, gram, pixel_rows, sampled_rows
+from infercnvpy.pl._chromosome_heatmap_legacy import legacy_heatmap, legacy_summary, two_slope_norm
+from infercnvpy.pl._heatmap_kernels import ColumnRanges, Gram, binned_sums, pixel_rows, sampled_rows
+from infercnvpy.tl._copy_number import _top_eigenvectors
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -164,17 +166,16 @@ def chromosome_heatmap(
             )
         codes = cat.codes.astype(np.int64)
         order, bounds, rows = pixel_rows(codes, len(cat.categories), _n_pixel_rows(fig, ax, swap=opts.swap_axes))
+        also = [ColumnRanges(X.shape[1])] if opts.standard_scale == "var" else []  # in the same pass
         if aggregate == "sample":
-            values, lo, hi = sampled_rows(X, order[(bounds[:-1] + bounds[1:]) // 2])
+            values, lo, hi = sampled_rows(X, order[(bounds[:-1] + bounds[1:]) // 2], *also)
         else:
-            values = binned_sums(X, order, bounds) / np.diff(bounds)[:, None]
-        if opts.standard_scale == "var":
-            var_range = column_ranges(X)
+            values = binned_sums(X, order, bounds, *also) / np.diff(bounds)[:, None]
+        if also:
+            var_range = also[0].lo, also[0].hi
     values = opts.transform(values, var_range)
     if aggregate == "mean":
         lo, hi = np.nanmin(values), np.nanmax(values)
-        center = 0 if opts.vcenter is None else opts.vcenter
-        lo, hi = min(lo, center - 1e-9), max(hi, center + 1e-9)  # TwoSlopeNorm needs vmin < vcenter < vmax
     norm = opts.color_norm(lo, hi)
     axes = _draw(fig, ax, adata, groupby, cat, palette, values, rows, dendro, use_rep, norm, cmap, opts)
     return _finish(fig, axes, show=show, save=save, return_fig=return_fig, own=own)
@@ -291,11 +292,7 @@ class _Options:
         """The user's `norm`, or a `TwoSlopeNorm` at `vcenter` (0) from `vmin` to `vmax` (default `lo` and `hi`)."""
         if self.norm is not None:
             return self.norm
-        return TwoSlopeNorm(
-            0 if self.vcenter is None else self.vcenter,
-            vmin=lo if self.vmin is None else self.vmin,
-            vmax=hi if self.vmax is None else self.vmax,
-        )
+        return two_slope_norm(0 if self.vcenter is None else self.vcenter, lo, hi, self.vmin, self.vmax)
 
 
 #: :func:`scanpy.pl.heatmap` arguments that `mode="fast"` implements; any other one switches to `mode="legacy"`.
@@ -324,7 +321,11 @@ def _use_legacy(func: str, adata: AnnData, groupby: str, use_rep: str, mode: str
     if kwargs.get("standard_scale") not in (None, "var", "obs"):
         reasons.append(f"standard_scale={kwargs['standard_scale']!r}")
     col = _obs_column(adata, groupby)
-    if pd.api.types.is_numeric_dtype(col) and not isinstance(col.dtype, pd.CategoricalDtype):
+    if (
+        pd.api.types.is_numeric_dtype(col)
+        and not pd.api.types.is_bool_dtype(col)
+        and not isinstance(col.dtype, pd.CategoricalDtype)
+    ):
         reasons.append("a numeric `groupby` column")
     if reasons:
         X = adata.obsm[f"X_{use_rep}"]
@@ -409,10 +410,10 @@ def _reduce_groups(sums: np.ndarray, counts: np.ndarray, rows: np.ndarray) -> np
     return np.add.reduceat(sums, starts, axis=0) / np.add.reduceat(counts, starts)[:, None]
 
 
-def _group_means(X: Any, codes: np.ndarray, n_groups: int) -> np.ndarray:
+def _group_means(X: Any, codes: np.ndarray, n_groups: int, *also: Callable[..., None]) -> np.ndarray:
     """Means of the non-empty groups in one pass, with several runs per group so that all threads take part."""
     order, bounds, rows = pixel_rows(codes, n_groups, max(n_groups, n_kernel_chunks(len(codes))))
-    return _reduce_groups(binned_sums(X, order, bounds), np.diff(bounds), rows)
+    return _reduce_groups(binned_sums(X, order, bounds, *also), np.diff(bounds), rows)
 
 
 def _order_by_dendrogram(
@@ -443,34 +444,35 @@ def _order_by_dendrogram(
 def _dendrogram(X: Any, groups: pd.Categorical, groupby: str, means: np.ndarray | None = None) -> dict[str, Any]:
     """What :func:`scanpy.tl.dendrogram` with its defaults stores for the rows of `X` grouped by `groups` (as legacy).
 
-    `means` are the means of the non-empty groups in the order of the categories, if already known. With more
-    windows than `scanpy.settings.N_PCS`, scanpy clusters the groups' means of a PCA of all rows (`_pca_group_means`).
+    `means` are the means of the non-empty groups in the order of the categories, if already known (`X` is then in
+    memory). With more windows than `scanpy.settings.N_PCS`, scanpy clusters the groups' means of a PCA of all rows
+    (`_pca_group_means`), whose Gram matrix comes from the same pass as the means.
     """
+    gram = Gram(X.shape[1]) if X.shape[1] > sc.settings.N_PCS else None
+    also = [] if gram is None else [gram]
     if means is None:
-        means = _group_means(X, groups.codes.astype(np.int64), len(groups.categories))
-    if X.shape[1] > sc.settings.N_PCS:
-        means = _pca_group_means(X, means)
+        means = _group_means(X, groups.codes.astype(np.int64), len(groups.categories), *also)
+    elif gram is not None:
+        gram(X, 0, 0, X.shape[0])
+    if gram is not None:
+        means = _pca_group_means(gram, X.shape[0], means)
     present = groups.remove_unused_categories().categories
     obs = pd.DataFrame({groupby: pd.Categorical(present, categories=present)})
     obs.index = obs.index.astype(str)
     return sc.tl.dendrogram(AnnData(means, obs=obs), groupby, inplace=False)
 
 
-def _pca_group_means(X: Any, means: np.ndarray) -> np.ndarray:
-    """The groups' means (`means`, in windows) in the cells' PCA of :func:`scanpy.pp.pca` with its defaults.
+def _pca_group_means(gram: Gram, n: int, means: np.ndarray) -> np.ndarray:
+    """The groups' means (`means`, in windows) in the PCA of the `n` cells of :func:`scanpy.pp.pca` with its defaults.
 
-    The PCA comes from the eigenvectors of the covariance, with the signs of :func:`sklearn.utils.extmath.svd_flip`.
+    The PCA comes from the top eigenvectors of the covariance (from the cells' `gram`), with the signs of
+    :func:`sklearn.utils.extmath.svd_flip`.
     """
-    import scipy.linalg
-
-    n, m = X.shape
+    m = len(gram.sums)
     n_comps = min(n, m) - 1 if min(n, m) <= sc.settings.N_PCS else sc.settings.N_PCS
-    G, sums = gram(X)
-    mu = sums / n
-    _, vecs = scipy.linalg.eigh((G - n * np.outer(mu, mu)) / (n - 1))
-    comps = vecs[:, ::-1][:, :n_comps].T
-    comps *= np.sign(comps[np.arange(n_comps), np.abs(comps).argmax(axis=1)])[:, None]
-    return (means - mu) @ comps.T
+    mu = gram.sums / n
+    comps = _top_eigenvectors((gram.G - n * np.outer(mu, mu)) / (n - 1), n_comps)
+    return (means - mu) @ comps
 
 
 # --- drawing --------------------------------------------------------------------------------------------------------
@@ -597,16 +599,7 @@ def _chromosome_brackets(
             texts.append(ax.text((lo + hi) / 2, 1.1, label, ha="center", va="bottom", rotation=rotation))
         codes += [MplPath.MOVETO, MplPath.LINETO, MplPath.LINETO, MplPath.LINETO]
     ax.add_patch(patches.PathPatch(MplPath(verts, codes), facecolor="none", lw=1.5))
-    widths = np.diff([*starts, n_cols])
-
-    def thin(renderer: RendererBase) -> None:
-        pos = np.array([t.get_transform().transform(t.get_position())[1 if right else 0] for t in texts])
-        extent = np.array([_extent(t, t.get_text(), renderer, along_x=not right) for t in texts])
-        for t, show in zip(texts, _keep_labels(pos, extent, widths), strict=True):
-            if t.get_visible() != show:
-                t.set_visible(show)
-
-    ax.add_artist(_BeforeDraw(thin))
+    ax.add_artist(_BeforeDraw(partial(_thin_brackets, texts, np.diff([*starts, n_cols]), right)))
     if right:
         ax.set_xlim(0, 1)
     else:
@@ -614,25 +607,34 @@ def _chromosome_brackets(
     ax.axis("off")
 
 
+def _thin_brackets(texts: list[Text], widths: np.ndarray, right: bool, renderer: RendererBase) -> None:
+    """Hide the chromosome labels that would overlap the label of a wider chromosome."""
+    pos = np.array([t.get_transform().transform(t.get_position())[1 if right else 0] for t in texts])
+    extent = np.array([_extent(t, t.get_text(), renderer, along_x=not right) for t in texts])
+    for t, show in zip(texts, _keep_labels(pos, extent, widths), strict=True):
+        if t.get_visible() != show:
+            t.set_visible(show)
+
+
 def _thin_group_labels(ax: Axes, labels: list[str], centers: np.ndarray, rows: np.ndarray, *, swap: bool) -> None:
     """Leave out the tick labels of groups that would overlap the label of a larger group, at drawing time."""
-    axis = ax.xaxis if swap else ax.yaxis
     formatter = FixedFormatter(labels)
-    axis.set_major_formatter(formatter)
+    (ax.xaxis if swap else ax.yaxis).set_major_formatter(formatter)
+    ax.add_artist(_BeforeDraw(partial(_thin_ticks, ax, formatter, labels, centers, rows, swap)))
 
-    def thin(renderer: RendererBase) -> None:
-        proto = axis.get_major_ticks()[0].label1  # font and rotation of the tick labels
-        pos = ax.transData.transform(np.column_stack([centers, centers]))[:, 0 if swap else 1]
-        extent = np.array([_extent(proto, label, renderer, along_x=swap) for label in labels])
-        formatter.seq = [
-            label if keep else "" for label, keep in zip(labels, _keep_labels(pos, extent, rows), strict=True)
-        ]
 
-    ax.add_artist(_BeforeDraw(thin))
+def _thin_ticks(ax, formatter, labels, centers, rows, swap: bool, renderer: RendererBase) -> None:
+    proto = (ax.xaxis if swap else ax.yaxis).get_major_ticks()[0].label1  # font and rotation of the tick labels
+    pos = ax.transData.transform(np.column_stack([centers, centers]))[:, 0 if swap else 1]
+    extent = np.array([_extent(proto, label, renderer, along_x=swap) for label in labels])
+    formatter.seq = [label if keep else "" for label, keep in zip(labels, _keep_labels(pos, extent, rows), strict=True)]
 
 
 class _BeforeDraw(Artist):
-    """Calls `callback(renderer)` when its axes draws, before the tick labels and texts (it draws first)."""
+    """Calls `callback(renderer)` when its axes draws, before the tick labels and texts (it draws first).
+
+    The callback is a module-level function (bound with `functools.partial`), so that the figure can be pickled.
+    """
 
     def __init__(self, callback: Callable[[RendererBase], None]):
         super().__init__()

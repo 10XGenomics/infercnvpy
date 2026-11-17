@@ -130,24 +130,9 @@ def _graph(adata: AnnData, connectivity_key: str) -> sp.csr_matrix:
     G = sp.csr_matrix(G, copy=True) if sp.issparse(G) else sp.csr_matrix(np.asarray(G))
     if (G.data < 0).any():
         raise ValueError(f"`adata.obsp[{connectivity_key!r}]` must have non-negative weights.")
-    G.eliminate_zeros()  # stored zeros are not neighbors
+    G.data[G.indices == np.repeat(np.arange(G.shape[0]), np.diff(G.indptr))] = 0  # a cell is not its own neighbor
+    G.eliminate_zeros()  # nor are stored zeros
     return G
-
-
-def _smooth(G: sp.csr_matrix, X, alpha: float | None, n_hops: int) -> np.ndarray:
-    """`n_hops` smoothing steps of `X` (dense or sparse) over the graph `G`, see the module docstring."""
-    graph = (G.indptr, G.indices, G.data.astype(np.float64, copy=False), -1.0 if alpha is None else float(alpha))
-    out = np.empty(X.shape, dtype=np.float32)
-    if sp.issparse(X):
-        X = sp.csr_matrix(X)
-        _hop_csr(*graph, X.indptr, X.indices, X.data, out)
-    else:
-        _hop_dense(*graph, np.ascontiguousarray(X), out)
-    buf = np.empty_like(out)
-    for _ in range(n_hops - 1):
-        _hop_dense(*graph, out, buf)
-        out, buf = buf, out
-    return out
 
 
 def smooth_cnv(
@@ -259,9 +244,20 @@ def smooth_cnv(
         raise ValueError(f"`adata.obsp[{connectivity_key!r}]` has shape {G.shape}, expected {(X.shape[0],) * 2}.")
 
     start = log.debug("smooth_cnv: %d cells x %d windows, %d hops", X.shape[0], X.shape[1], n_hops)
+    graph = (G.indptr, G.indices, G.data.astype(np.float64, copy=False), -1.0 if alpha is None else float(alpha))
+    out = np.empty(X.shape, dtype=np.float32)
     with numba_threads(n_jobs):
-        out = _smooth(G, X, alpha, n_hops)
-    n_isolated = int(np.count_nonzero(np.diff(G.indptr) - (G.diagonal() != 0) == 0))
+        if sp.issparse(X):
+            X = sp.csr_matrix(X)
+            _hop_csr(*graph, X.indptr, X.indices, X.data, out)
+        else:
+            _hop_dense(*graph, np.ascontiguousarray(X), out)
+        if n_hops > 1:
+            buf = np.empty_like(out)
+            for _ in range(n_hops - 1):
+                _hop_dense(*graph, out, buf)
+                out, buf = buf, out
+    n_isolated = int(np.count_nonzero(np.diff(G.indptr) == 0))
     log_result(
         "smooth_cnv",
         "smoothed %d cells over %d hops" + (", %d cells without neighbors kept their values" if n_isolated else ""),
@@ -377,8 +373,6 @@ def spatial_regions(
     if G.shape != (adata.n_obs, adata.n_obs):
         raise ValueError(f"`adata.obsp[{connectivity_key!r}]` has shape {G.shape}, expected {(adata.n_obs,) * 2}.")
     W = ((G + G.T) / 2).tocsr()
-    W.setdiag(0)
-    W.eliminate_zeros()
     W.data *= adata.n_obs / max(W.data.sum(), np.finfo(float).tiny)  # the mean row sum is 1
 
     before = labels.copy()

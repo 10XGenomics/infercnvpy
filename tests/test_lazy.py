@@ -68,7 +68,7 @@ def test_dask_dense(oligo, expected, block_rows):
     _check(_with_X(oligo, X), expected)
 
 
-@pytest.mark.parametrize("block_rows", [30, 184])
+@pytest.mark.parametrize("block_rows", [10, 30, 97, 184])
 def test_dask_sparse_blocks(oligo, expected, block_rows):
     _check(_with_X(oligo, _csr_blocks(oligo, block_rows)), expected)
 
@@ -136,7 +136,7 @@ def test_streaming_reference_matches_in_memory(oligo):
         np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-7)
 
 
-@pytest.mark.parametrize("scheduler", ["threads", "synchronous"])
+@pytest.mark.parametrize("scheduler", ["threads", "synchronous", "processes"])
 def test_lazy_output(oligo, expected, scheduler):
     """With `lazy=True`, the result stays a dask array of CSR blocks and equals the eager result exactly."""
     X = _csr_blocks(oligo, 50)
@@ -152,9 +152,8 @@ def test_lazy_output(oligo, expected, scheduler):
     _check(_with_X(oligo, X), expected, lazy=True)
 
 
-@pytest.mark.parametrize("scheduler", ["synchronous", "processes"])
-def test_kernels_in_dask_tasks_run_serially(oligo, expected, scheduler, monkeypatch):
-    """Inside a dask task, every kernel runs its serial twin, also on the main thread (synchronous, or processes)."""
+def test_kernels_in_dask_tasks_run_serially(oligo, expected, monkeypatch):
+    """Inside a dask task, every kernel runs its serial twin, also on the main thread (synchronous scheduler)."""
     from infercnvpy._numba import njit_parallel
     from infercnvpy.tl import _infercnv_kernels
 
@@ -167,7 +166,7 @@ def test_kernels_in_dask_tasks_run_serially(oligo, expected, scheduler, monkeypa
         if isinstance(kernel, njit_parallel):
             monkeypatch.setattr(kernel, "parallel", spy(name, kernel))
     a = _with_X(oligo, _csr_blocks(oligo, 50))
-    with dask.config.set(scheduler=scheduler):
+    with dask.config.set(scheduler="synchronous"):
         _check(a, expected, lazy=True)
     assert parallel_calls == []
 
@@ -207,14 +206,6 @@ def test_lazy_without_threshold(oligo, expected):
     )
     want = cnv.tl.infercnv(oligo, **REF, dynamic_threshold=None, inplace=False)[1]
     np.testing.assert_allclose(res[1].compute().toarray(), want.toarray(), rtol=1e-5, atol=1e-5)
-
-
-def test_block_size_does_not_change_the_result(oligo):
-    results = [
-        cnv.tl.infercnv(_with_X(oligo, _csr_blocks(oligo, rows)), **REF, inplace=False)[1].toarray()
-        for rows in (10, 97)
-    ]
-    np.testing.assert_allclose(results[0], results[1], rtol=1e-5, atol=1e-6)
 
 
 def test_lazily_normalised_table(oligo):
@@ -265,8 +256,6 @@ def test_read_lazy(expected, zarr_store):
 
 def test_read_lazy_downstream(oligo, tmp_path):
     """Scores and heatmaps read the groups from the lazy `obs` of `anndata.experimental.read_lazy`."""
-    import matplotlib.pyplot as plt
-
     b = oligo.copy()
     cnv.tl.infercnv(b, **REF)
     b.obs["cell_type"] = b.obs["cell_type"].astype("category")
@@ -281,7 +270,6 @@ def test_read_lazy_downstream(oligo, tmp_path):
     np.testing.assert_allclose(np.asarray(a.obs["cnv_score"]), b.obs["cnv_score"], rtol=1e-6)
     cnv.pl.chromosome_heatmap(a, groupby="cell_type", show=False)
     cnv.pl.chromosome_heatmap_summary(a, groupby="cell_type", show=False)
-    plt.close("all")
     a.obsm["X_cnv"] = a.obsm["X_cnv"].compute()  # ithcna needs the CNV matrix in memory
     lazy_ith = cnv.tl.ithcna(a, groupby="cell_type", inplace=False)
     ith = cnv.tl.ithcna(b, groupby="cell_type", inplace=False)

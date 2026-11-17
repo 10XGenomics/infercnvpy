@@ -26,23 +26,21 @@ def test_maynard2020_3k(tmp_path, monkeypatch):
     assert (tmp_path / "maynard2020_3k.h5ad").is_file()
 
 
-@pytest.mark.parametrize("cached", [True, False])
-def test_maynard2020_3k_reuses_the_file_of_infercnvpy_0_6(tmp_path, monkeypatch, cached):
-    """infercnvpy 0.6 downloaded it into scanpy's `datasetdir`: a file there is used instead of a new download."""
+def test_fetch_leaves_scanpy_datasetdir_alone(tmp_path, monkeypatch):
+    """A file named like a dataset in scanpy's `datasetdir` is the user's: it is neither used nor overwritten."""
     import pooch
     import scanpy as sc
 
     import infercnvpy.datasets
 
     monkeypatch.delenv(DATASET_ENV_VAR, raising=False)
-    if cached:
-        (tmp_path / "maynard2020_3k.h5ad").touch()
+    (tmp_path / "oligodendroglioma.h5ad").write_text("mine")
     used = []
     monkeypatch.setattr(infercnvpy.datasets, "fetch", lambda entry, cache_dir, **kw: used.append(cache_dir))
-    datasetdir = sc.settings.datasetdir
-    sc.settings.datasetdir = tmp_path
+    datasetdir, sc.settings.datasetdir = sc.settings.datasetdir, tmp_path
     try:
-        cnv.datasets.maynard2020_3k()
+        cnv.datasets.oligodendroglioma()
     finally:
         sc.settings.datasetdir = datasetdir
-    assert used == [tmp_path if cached else pooch.os_cache("infercnvpy")]
+    assert used == [pooch.os_cache("infercnvpy")]
+    assert (tmp_path / "oligodendroglioma.h5ad").read_text() == "mine"

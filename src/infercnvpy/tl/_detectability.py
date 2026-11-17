@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
+from copy import copy
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -14,9 +15,9 @@ from anndata import AnnData
 from scipy.stats import norm
 
 from infercnvpy._logging import SKIP_OWN_FRAMES, log_result
-from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_df, _as_matrix, _obs_column, _params_for_uns
-from infercnvpy.tl._copy_number import HG38_LENGTHS, _as_list, _reference_cells
+from infercnvpy._numba import numba_threads
+from infercnvpy._util import _as_df, _as_list, _as_matrix, _obs_column, _params_for_uns
+from infercnvpy.tl._copy_number import HG38_LENGTHS, _reference_cells
 from infercnvpy.tl._detectability_kernels import _arm_information, _nb_moments
 from infercnvpy.tl._infercnv import _group_sums, _kernel_ready, _natural_sort
 
@@ -33,6 +34,7 @@ _HG38_CENTROMERES = {
 #: p arms of the acrocentric chromosomes, which hold no genes of their own: listed only when the panel has genes there
 _ACROCENTRIC_P = {"chr13p", "chr14p", "chr15p", "chr21p", "chr22p"}
 _MAX_PHI = 100.0  # cap of the NB dispersion 1 / k of a gene
+_CHUNKS = 16  # row chunks of the kernels' sums: fixed, so that the sums don't depend on `n_jobs`
 _MIN_REF_COUNTS = 20  # reference counts of a gene below which its dispersion is not trusted on its own
 
 
@@ -105,10 +107,10 @@ def detectability(
         Number of cells for `gain_ratio` and `loss_ratio`. `1` gives what a single cell shows.
     gain
         Copy ratio of the gain for `cells_gain`. 1.5 is one extra copy in a diploid genome. In a near-tetraploid
-        tumour, one extra copy is 1.25.
+        tumor, one extra copy is 1.25.
     loss
         Copy ratio of the loss for `cells_loss`. 0.5 is one copy lost in a diploid genome, and 0.75 in a
-        near-tetraploid tumour.
+        near-tetraploid tumor.
     alpha
         One-sided level of the test of each arm. The default, 0.001, is about 0.05 with a Bonferroni correction for 40
         arms.
@@ -203,10 +205,10 @@ def detectability(
 
     Solved for :math:`n`, the condition gives `cells_gain` and `cells_loss`, and solved for :math:`r` the smallest
     detectable ratio. The test knows the normal expression of every cell type, so its numbers are a lower bound. It
-    also assumes that expression follows the DNA copies one to one, that the tumour is near diploid (set `gain` and
+    also assumes that expression follows the DNA copies one to one, that the tumor is near diploid (set `gain` and
     `loss` otherwise), and that all tested cells carry the change. With a share :math:`f` of clone cells among the
     tested cells, multiply the cells needed by :math:`1 / f^2`. The test treats cells as independent, so a program
-    shared by all cells of a clone (a tumour state, for example) is not averaged away by more cells. It covers whole
+    shared by all cells of a clone (a tumor state, for example) is not averaged away by more cells. It covers whole
     arms only, so focal events such as an amplification of SOX2 or MYC or a deletion of CDKN2A are not covered.
 
     **Depths.** With `depth`, the counts are thinned at random to each target median per cell, and the null variance
@@ -217,7 +219,7 @@ def detectability(
     expression data at least as deep as the target.
 
     **Calibration.** We injected arm gains of 1.5x and losses of 0.5x into cells of a breast cancer section measured
-    with 10x Atera (whole transcriptome in situ), namely fibroblasts, normal epithelium and one tumour clone, cut to
+    with 10x Atera (whole transcriptome in situ), namely fibroblasts, normal epithelium and one tumor clone, cut to
     five panels at two depths. An oracle score test that is given the true expected expression needed 0.6 to 1.1
     times the cells of the achievable column, and the two rank the arms alike (Spearman 0.98 to 0.99). The ideal
     column over-promises by up to about 3 times on deep, wide panels, where the null variance is largest.
@@ -234,7 +236,7 @@ def detectability(
 
     On panels of 1,000 genes or fewer, `tl.infercnv` missed about a third of the arm events at any number of cells.
     When many arms change at once, it also shifts arms without a change, by smoothing over arm borders and by
-    centring each cell. :func:`infercnvpy.tl.copy_number` detects clones rather than single arms, so the table
+    centering each cell. :func:`infercnvpy.tl.copy_number` detects clones rather than single arms, so the table
     doesn't apply to it.
 
     **Small panels.** On panels with fewer than 1,000 usable genes or below a median of 150 counts per cell,
@@ -284,7 +286,11 @@ def detectability(
     frames = []
     with numba_threads(n_jobs):
         model.fit(X)
-        base = model.run(X, 1.0) if inplace or any(t >= observed or np.isclose(t, observed) for t in targets) else None
+        base = (
+            model.run(X, 1.0)
+            if inplace or any(t > observed or np.isclose(t / observed, 1.0) for t in targets)
+            else None
+        )
         for target in targets:
             f = target / observed
             if np.isclose(f, 1.0):
@@ -292,21 +298,18 @@ def detectability(
                 fit, null_var, source = base, _measured(base), "measured"
             elif f < 1:
                 rng = np.random.default_rng([random_state, int(round(target * 1000))])
-                fit = model.run(_thin(X, f, rng), 1.0)
+                thinned = _thin(X, f, rng)
+                fit = model.at(thinned).run(thinned, 1.0)
                 null_var, source = _measured(fit), "measured"
             else:
                 assert base is not None
                 fit = model.run(X, f)
                 null_var, source = _extrapolated(base, fit), "extrapolated"
             frames.append(
-                _table(fit, null_var, model, group, arms, target, source, at_n_cells, gain, loss, alpha, power).assign(
-                    depth_factor=f
-                )
+                _table(fit, null_var, model, group, arms, target, source, at_n_cells, gain, loss, alpha, power)
             )
+            frames[-1].insert(2, "depth_factor", f)
     table = pd.concat(frames, ignore_index=True)
-    columns = list(table.columns)
-    columns.insert(columns.index("depth") + 1, columns.pop(columns.index("depth_factor")))
-    table = table[columns]
     _warn_unmeasured(table)
 
     n_ref = int(is_ref.sum())
@@ -380,19 +383,35 @@ class _Model:
 
     def fit(self, X: sp.csr_matrix) -> None:
         """Expected shares of each share group and the NB dispersion of each gene, on the observed counts `X`."""
-        n_codes = 2 * self.n_groups
-        sums = _group_sums(X, np.arange(X.shape[0]), self.code, n_codes)
+        sums = self._shares(X)
+        self.phi = self._dispersion(X, ref_counts=sums[1::2].sum(axis=0))
+        self._set_P2()
+
+    def at(self, X: sp.csr_matrix) -> _Model:
+        """A copy with the shares and group counts of the counts `X` (e.g. thinned) and the dispersions of `fit`.
+
+        The leave-one-out expectation of a cell needs the group counts and shares of the counts it is run on.
+        """
+        model = copy(self)
+        model._shares(X)
+        model._set_P2()
+        return model
+
+    def _shares(self, X: sp.csr_matrix) -> np.ndarray:
+        sums = _group_sums(X, np.arange(X.shape[0]), self.code, 2 * self.n_groups)
         self.Ns = sums.sum(axis=1)
         with np.errstate(invalid="ignore", divide="ignore"):
             self.p = np.nan_to_num(sums / self.Ns[:, None])
         self.P = np.asarray(self.p @ self.to_arm)
-        self.phi = self._dispersion(X, ref_counts=sums[1::2].sum(axis=0))
+        return sums
+
+    def _set_P2(self) -> None:
         q = self.p**2 * self.phi
         self.P2 = np.column_stack([np.asarray(q @ self.to_arm), q.sum(axis=1)])
 
     def run(self, X: sp.csr_matrix, scale: float) -> _Fit:
         """Information of every group and arm, and the null sums of the reference cells, on the counts `X`."""
-        n_chunks = n_kernel_chunks(X.shape[0])
+        n_chunks = _CHUNKS
         sums = np.zeros((n_chunks, self.n_groups, 3, self.n_arms))
         null = np.zeros((n_chunks, 4, self.n_arms))
         cell_info = np.zeros(X.shape[0])
@@ -413,7 +432,7 @@ class _Model:
         Genes with fewer than `_MIN_REF_COUNTS` reference counts get at least the median dispersion of the others.
         """
         rows = np.flatnonzero(self.is_ref)
-        n_chunks = n_kernel_chunks(len(rows))
+        n_chunks = _CHUNKS
         n_codes, n_genes = self.p.shape
         xx, xm, dm, dm2 = (np.zeros((n_chunks, n_genes)) for _ in range(4))
         s1, s2 = np.zeros((n_chunks, n_codes, self.n_arms)), np.zeros((n_chunks, n_codes, self.n_arms))
@@ -509,7 +528,9 @@ def _min_ratio(I, A, B, v, n: int, za: float, zb: float, *, gain: bool) -> np.nd
     with np.errstate(invalid="ignore", divide="ignore"):
         k, c, q = np.sqrt(n) * I, np.sqrt(v) * za * np.sqrt(I), v * zb**2
         a2, a1, a0 = k**2 - q * B, -(2 * k * c + s * q * (A + 2 * B)), c**2 - q * I
-        disc = np.sqrt(a1**2 - 4 * a2 * a0)
+        disc = np.sqrt(
+            np.maximum(a1**2 - 4 * a2 * a0, 0)
+        )  # power 0.5 gives a square, whose discriminant rounds below 0
         roots = np.stack([(-a1 - disc) / (2 * a2), (-a1 + disc) / (2 * a2)])
         roots = np.where(np.isclose(a2, 0), -a0 / a1, roots)
         roots = np.where((roots >= c / k * (1 - 1e-9)) & (gain | (roots <= 1)) & (I > 0), roots, np.nan)

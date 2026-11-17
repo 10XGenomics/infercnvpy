@@ -1,4 +1,7 @@
 import os
+import subprocess
+import sys
+import textwrap
 from collections.abc import Callable, Generator, Iterable
 from pathlib import Path
 
@@ -298,3 +301,16 @@ def knn_graph(coords: np.ndarray, k: int = 6) -> sp.csr_matrix:
     n = len(coords)
     G = sp.csr_matrix((np.ones(n * k), (np.repeat(np.arange(n), k), idx[:, 1:].ravel())), shape=(n, n))
     return ((G + G.T) > 0).astype(np.float64).tocsr()
+
+
+def run_python(script: str, *args, cwd=None, **env: str) -> None:
+    """Run `script` in a new Python process with the extra environment variables `env`, and check that it succeeds."""
+    res = subprocess.run(
+        [sys.executable, "-W", "ignore", "-c", textwrap.dedent(script), *map(str, args)],
+        env={**os.environ, **env},
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert res.returncode == 0, res.stderr

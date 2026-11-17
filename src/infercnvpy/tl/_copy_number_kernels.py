@@ -107,29 +107,11 @@ def hmm_posteriors(Y, V, stay, means, log_prior, nu, post_mean, post_neutral, st
                     beta[s] = (q * emis[i, s] * beta[s] + (1.0 - q) * mix) / c[i]
 
 
-@njit_parallel
-def pooled_counts(data, indices, indptr, rws, col_map, labels, out):
-    """Add the counts of each cell (row) to the row of its label: `out[chunk, label, gene]`, one slab per chunk.
-
-    Each chunk of cells writes its own slab, so there are no write conflicts; the caller sums the slabs.
-    """
-    n_chunks = out.shape[0]
-    n_rows = labels.shape[0]
-    step = (n_rows + n_chunks - 1) // n_chunks
-    for ch in prange(n_chunks):
-        for r in range(ch * step, min(n_rows, (ch + 1) * step)):
-            lab = labels[r]
-            for k in range(indptr[rws[r]], indptr[rws[r] + 1]):
-                g = col_map[indices[k]]
-                if g >= 0:
-                    out[ch, lab, g] += data[k]
-
-
 @njit
 def _spillover(y, a, g):
     """Spillover fraction of one cell.
 
-    The fraction `s` in [0, 1] of a cell's counts `y` that maximises the Poisson likelihood of the window shares
+    The fraction `s` in [0, 1] of a cell's counts `y` that maximizes the Poisson likelihood of the window shares
     `(1 - s) a + s g` (`a`: the cell's own diploid shares, `g`: the pooled shares of aneuploid cells). The likelihood
     is concave in `s`, so its derivative has at most one root: Newton steps kept inside a bracket that bisection
     narrows when a step leaves it.
@@ -433,56 +415,6 @@ def project_rows(data, indices, indptr, rws, col_map, hvg_of_gene, loadings, out
                         val = math.log1p(data[k] * f)
                         for p in range(P):
                             out[r, p] += val * loadings[h, p]
-
-
-@njit_parallel
-def assign_loglik(
-    data,
-    indices,
-    indptr,
-    rws,
-    col_map,
-    gene_win,
-    types,
-    share,
-    log_share,
-    phi,
-    use,
-    g,
-    spill_ok,
-    smax,
-    out,
-    spill,
-    n_chunks,
-):
-    """Negative binomial log likelihood of each cell under each clone, straight from the CSR counts.
-
-    The cell's counts are summed per window of genes in a scratch row (one per chunk of cells), so no cells x windows
-    matrix is stored. `spill` receives each cell's spillover fraction, estimated for every cell (as in
-    `nb_loglik_types` with `report`).
-    """
-    n_rows = out.shape[0]
-    W = share.shape[2]
-    wins, sh, ls, ph, gu = _used_windows(use, share, log_share, phi, g)
-    nu = max(len(wins), 1)
-    step = (n_rows + n_chunks - 1) // n_chunks
-    for ch in prange(n_chunks):
-        buf = np.zeros(W)
-        scr, yc = np.empty((6, nu)), np.empty(len(wins))
-        for r in range(ch * step, min(n_rows, (ch + 1) * step)):
-            for w in range(W):
-                buf[w] = 0.0
-            for k in range(indptr[rws[r]], indptr[rws[r] + 1]):
-                gi = col_map[indices[k]]
-                if gi >= 0:
-                    buf[gene_win[gi]] += data[k]
-            s = 0.0
-            for w in range(W):
-                if use[w]:
-                    s += buf[w]
-            for j in range(len(wins)):
-                yc[j] = buf[wins[j]]
-            spill[r] = _cell_loglik(yc, max(s, 1e-3), types[r], sh, ls, ph, gu, spill_ok, smax, True, out[r], scr)
 
 
 @njit_parallel
