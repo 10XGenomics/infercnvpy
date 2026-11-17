@@ -16,7 +16,7 @@ from scipy.stats import norm
 
 from infercnvpy._logging import SKIP_OWN_FRAMES, log_result
 from infercnvpy._numba import numba_threads
-from infercnvpy._util import _as_df, _as_list, _as_matrix, _obs_column, _params_for_uns
+from infercnvpy._util import _as_df, _as_list, _as_matrix, _check_counts, _obs_column, _params_for_uns
 from infercnvpy.tl._copy_number import HG38_LENGTHS, _reference_cells
 from infercnvpy.tl._detectability_kernels import _arm_information, _nb_moments
 from infercnvpy.tl._infercnv import _group_sums, _kernel_ready, _natural_sort
@@ -577,10 +577,7 @@ def _counts(adata: AnnData, layer: str | None) -> sp.csr_matrix:
     if layer is not None and layer not in adata.layers:
         raise KeyError(f"`layer={layer!r}` is not in `adata.layers`.")
     X = _kernel_ready(sp.csr_matrix(_as_matrix(adata.X if layer is None else adata.layers[layer], "the raw counts")))
-    if X.data.size and (X.data.min() < 0 or np.any(X.data != np.round(X.data))):
-        raise ValueError(
-            "`tl.detectability` needs raw counts (non-negative integers); pass the layer with the counts as `layer`."
-        )
+    _check_counts(X.data, "tl.detectability")
     return X
 
 

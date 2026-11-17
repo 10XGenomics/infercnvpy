@@ -40,6 +40,14 @@ def _as_matrix(x, what: str = "the expression matrix", *, lazy: bool = False):
     raise TypeError(f"infercnvpy needs {what} as {kinds}, got {type(x).__name__}.")
 
 
+def _check_counts(values: np.ndarray, tool: str) -> None:
+    """Raise unless `values` are raw counts (non-negative integers)."""
+    if values.size and (values.min() < 0 or np.any(values != np.round(values))):
+        raise ValueError(
+            f"`{tool}` needs raw counts (non-negative integers); pass the layer with the counts as `layer`."
+        )
+
+
 def _is_dask(x) -> bool:
     """Whether `x` is a dask array (without importing dask)."""
     da = sys.modules.get("dask.array")

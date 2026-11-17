@@ -31,7 +31,7 @@ from tqdm.auto import tqdm
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_list, _as_matrix, _listed, _params_for_uns
+from infercnvpy._util import _as_list, _as_matrix, _check_counts, _listed, _params_for_uns
 from infercnvpy.tl import _copy_number_kernels as K
 from infercnvpy.tl._infercnv import NO_CHR_NAMES, _check_var, _natural_sort, _on_used_chromosomes, _Rows
 from infercnvpy.tl._infercnv_kernels import _group_sums_csr
@@ -864,6 +864,8 @@ def _filter_cells_genes(adata, source, excluded, exclude_chromosomes, min_genes,
     for X, rws in source.rows_of(None):  # all rows: each block's rows are contiguous
         if len(rws):
             X = _csr(X)
+            if not ndet:  # the first block only, so that lazy input gets no extra pass
+                _check_counts(X.data[X.indptr[rws[0]] : X.indptr[rws[-1] + 1]], "tl.copy_number")
             nd = np.empty(len(rws), dtype=np.int64)
             K.row_stats(X.data, X.indices, X.indptr, int(rws[0]), min_genes, nd, det)
             ndet.append(nd)

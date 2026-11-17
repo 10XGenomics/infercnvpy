@@ -1,5 +1,6 @@
 """`tl.copy_number`: kernels against references, and the whole method on small synthetic data."""
 
+import dask.array as da
 import numpy as np
 import pandas as pd
 import pytest
@@ -620,6 +621,27 @@ def test_copy_number_filtered_cells_and_writing(tmp_path):
     cnv.pl.chromosome_heatmap(adata, groupby="copy_number_clone", use_rep="copy_number", mode="legacy", show=False)
     adata.write_h5ad(tmp_path / "cn.h5ad")
     adata.write_zarr(tmp_path / "cn.zarr")
+
+
+@pytest.mark.parametrize("fmt", ["dense", "csr", "dask"])
+def test_copy_number_needs_counts(fmt):
+    """Normalized or negative values raise before any fit; integer-valued floats are counts."""
+    adata = _simulate(n_tumour=20, n_normal=10, genes=100)
+    counts = adata.X.toarray().astype(np.float32)
+    normalized = np.log1p(counts / counts.sum(axis=1, keepdims=True) * 1e4)
+    negative = counts.copy()
+    negative[0, 0] = -1
+    as_fmt = {
+        "dense": lambda X: X,
+        "csr": sp.csr_matrix,
+        "dask": lambda X: da.from_array(X, chunks=(10, -1)).map_blocks(sp.csr_matrix),
+    }[fmt]
+    for X in (normalized, negative):
+        adata.X = as_fmt(X)
+        with pytest.raises(ValueError, match=r"`tl\.copy_number` needs raw counts"):
+            cnv.tl.copy_number(adata, n_jobs=1, inplace=False)
+    adata.X = as_fmt(counts)
+    cnv.tl.copy_number(adata, n_jobs=1, inplace=False)  # a small panel: undetermined, after the check
 
 
 def test_copy_number_dense_and_strings():
