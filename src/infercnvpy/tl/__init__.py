@@ -8,6 +8,7 @@ from infercnvpy._logging import log
 from infercnvpy._util import _copy_for_inplace_false, _deprecated_positional
 
 from ._copy_number import copy_number
+from ._detectability import detectability
 from ._infercnv import infercnv
 from ._scores import cnv_score, ithcna, ithgex
 from ._spatial import smooth_cnv, spatial_regions
@@ -16,6 +17,7 @@ __all__ = [
     "cnv_score",
     "copy_number",
     "copykat",
+    "detectability",
     "infercnv",
     "ithcna",
     "ithgex",
