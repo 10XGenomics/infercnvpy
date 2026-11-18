@@ -171,16 +171,17 @@ def smooth_cnv(
 
     On imaging-based spatial data (Xenium, CosMx, ...) a cell has a few hundred counts from a
     gene panel, so single-cell CNV profiles are noisy. Neighboring cells in a tumor usually
-    share the same copy number state, and averaging over them recovers the signal, as kNN
-    smoothing in InSituCNV :cite:`Jensen2025` and spatial pooling in SlideCNA :cite:`Zhang2025`
-    do. Han et al. :cite:`Han2026` found that aggregating cells on a grid improved CNV recovery
-    on imaging platforms at native resolution. Smoothing also blurs the boundary between tumor
-    and normal tissue by about `n_hops` cells.
+    share the same copy number state, and averaging over them recovers the signal. Related
+    methods average before the CNV inference instead. InSituCNV :cite:`Jensen2025` smooths the
+    normalized expression over a kNN graph of expression similarity and then runs infercnvpy,
+    and SlideCNA :cite:`Zhang2025` pools the expression of neighboring beads. Han et al.
+    :cite:`Han2026` found that aggregating cells on a grid improved CNV recovery on imaging
+    platforms compared to native single-cell resolution. Smoothing also blurs the boundary
+    between tumor and normal tissue by about `n_hops` cells.
 
     By default, :func:`infercnvpy.tl.infercnv` sets the values in its noise band to 0, and
-    this function averages those zeros. On simulated imaging data, smoothing the unfiltered
-    matrix of `tl.infercnv(..., dynamic_threshold=None)` recovered the CNV profiles better and
-    separated tumor from normal cells better than smoothing the filtered one.
+    this function averages those zeros together with the values outside the band. To smooth the
+    unfiltered values, run `tl.infercnv(..., dynamic_threshold=None)`.
 
     The graph usually comes from :func:`squidpy.gr.spatial_neighbors_knn`, e.g.
     `sq.gr.spatial_neighbors_knn(adata, n_neighs=10)`, or from
@@ -203,14 +204,18 @@ def smooth_cnv(
     (e.g. normal epithelium next to a carcinoma, or cells with `NaN`) still share edges with
     the tumor, and a tumor cell labeled as a reference type is smoothed with the reference
     cells. The mask also does not remove tumor signal that a normal cell carries in its own
-    counts, e.g. from spillover or from a segmentation that merged it with a tumor cell. For a
-    threshold on the smoothed values, take reference cells far from the tumor (e.g. more than a
-    few cell diameters from any cell outside the reference) rather than all reference cells,
-    because those at the border can carry such signal. Even with the mask, more of the normal
-    cells at the border can pass such a threshold after smoothing than without smoothing,
-    because averaging them with their normal neighbors cuts the noise around the signal in
-    their own counts. A call at the border therefore needs evidence per cell beyond the CNV
-    profile, e.g. marker genes or morphology.
+    counts, e.g. from spillover or from a segmentation that merged it with a tumor cell. Before
+    you set a threshold on the smoothed values, compare the reference cells near the tumor with
+    those far from it in two ways. First, compare their unsmoothed values, which include the
+    cells right at the border. Second, compare their smoothed values among cells with the same
+    number of neighbors after the mask, because reference cells at the border keep fewer
+    neighbors, so their smoothed values are noisier and score higher even without tumor signal.
+    Take the threshold from the far reference cells only if the near ones score higher in one
+    of these comparisons, because then they carry tumor signal in their own counts. Even with
+    the mask, more of the normal cells at the border can pass a threshold after smoothing than
+    without smoothing, because averaging them with their normal neighbors cuts the noise around
+    the signal in their own counts. A call at the border therefore needs evidence per cell
+    beyond the CNV profile, e.g. marker genes or morphology.
 
     Parameters
     ----------
