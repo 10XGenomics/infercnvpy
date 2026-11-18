@@ -8,9 +8,22 @@ import scanpy.queries
 from anndata import AnnData
 
 from infercnvpy._logging import log_result
-from infercnvpy._util import _as_df
+from infercnvpy._util import _as_df, _splice_doc
+
+_MERGE_RULES = """\
+When adata is given, the gene positions from the annotation (the BioMart table or the GTF file)
+replace the `chromosome`, `start` and `end` columns that `adata.var` already has. For any other
+column name, an existing `adata.var` column wins over an annotation column of the same name.
+Existing positions are not kept as a fallback. Genes without an entry in the annotation get NaN
+positions, and so do genes whose id appears more than once in the annotation.
+`adata.var["chromosome"].isna().sum()` counts these genes after the call, or count them on the
+returned data frame with `inplace=False`. The log also reports the number of affected gene ids,
+as a warning when half or more are affected and at info level otherwise.
+:func:`infercnvpy.tl.infercnv` skips genes without a position.
+"""
 
 
+@_splice_doc(merge_rules=_MERGE_RULES)
 def genomic_position_from_biomart(
     adata: AnnData | None = None,
     *,
@@ -23,19 +36,23 @@ def genomic_position_from_biomart(
     """
     Get genomic gene positions from ENSEMBL Biomart.
 
+    {merge_rules}
+
     Parameters
     ----------
     adata
         Adds the genomic positions to `adata.var`. If adata is None, returns
-        a data frame with the genomic positions instead.
+        a data frame with the genomic positions instead, without the genes whose id
+        appears more than once in the annotation.
     adata_gene_id
-        Column in `adata.var` that contains (ENSMBL) gene IDs. If not specified,
+        Column in `adata.var` that contains (Ensembl) gene IDs. If not specified,
         use `adata.var_names`.
     biomart_gene_id
         The biomart column to use as gene identifier. Typically this would be `ensembl_gene_id` or `hgnc_symbol`,
         but could be different for other species.
     inplace
-        If True, add the annotations directly to adata, otherwise return a dataframe.
+        If True, add the annotations to `adata.var`. If False, return a copy of `adata.var`
+        with the annotations and leave adata unchanged. Ignored when adata is None.
     **kwargs
         passed on to :func:`scanpy.queries.biomart_annotations`
     """
@@ -81,6 +98,7 @@ def genomic_position_from_biomart(
     return var_annotated
 
 
+@_splice_doc(merge_rules=_MERGE_RULES)
 def genomic_position_from_gtf(
     gtf_file: Path | str,
     adata: AnnData | None = None,
@@ -94,6 +112,8 @@ def genomic_position_from_gtf(
 
     The GTF file needs to match the genome annotation used for your single cell dataset.
 
+    {merge_rules}
+
     .. warning::
         Currently only tested with GENCODE GTFs.
 
@@ -103,14 +123,16 @@ def genomic_position_from_gtf(
         Path to the GTF file
     adata
         Adds the genomic positions to `adata.var`. If adata is None, returns
-        a data frame with the genomic positions instead.
+        a data frame with the genomic positions instead, without the genes whose id
+        appears more than once in the annotation.
     gtf_gene_id
-        Use this GTF column to match it to anndata
+        Use this GTF column to match it to adata
     adata_gene_id
         Match this column to the gene ids from the GTF file. Default: use
         adata.var_names.
     inplace
-        If True, add the annotations directly to adata, otherwise return a dataframe.
+        If True, add the annotations to `adata.var`. If False, return a copy of `adata.var`
+        with the annotations and leave adata unchanged. Ignored when adata is None.
     """
     try:
         import gtfparse
@@ -154,18 +176,23 @@ def genomic_position_from_gtf(
 
 def _merge_var(adata: AnnData, annot: pd.DataFrame, adata_gene_id: str | None, annot_gene_id: str) -> pd.DataFrame:
     """`adata.var` with the columns of `annot` whose `annot_gene_id` matches `adata_gene_id` (default: var_names)."""
-    tmp_var = _as_df(adata.var).copy()
+    TMP_INDEX_NAME, TMP_KEY = "adata_var_index", "annot_gene_id"
+    left_on = TMP_INDEX_NAME if adata_gene_id is None else adata_gene_id
+    tmp_var = _as_df(adata.var)
+    # positions from an earlier run are replaced; other columns of var are kept over those of annot
+    tmp_var = tmp_var.drop(columns=[c for c in ("chromosome", "start", "end") if c in tmp_var.columns])
+    annot = annot.rename(columns={annot_gene_id: TMP_KEY})
+    annot = annot.drop(columns=[c for c in annot.columns if c in tmp_var.columns or c == left_on])
     orig_index_name = tmp_var.index.name
-    TMP_INDEX_NAME = "adata_var_index"
-    tmp_var.index.name = TMP_INDEX_NAME
-    tmp_var.reset_index(inplace=True)
-    var_annotated = tmp_var.merge(
-        annot,
-        how="left",
-        left_on=TMP_INDEX_NAME if adata_gene_id is None else adata_gene_id,
-        right_on=annot_gene_id,
-        validate="one_to_one",
+    var_annotated = (
+        tmp_var.rename_axis(TMP_INDEX_NAME)
+        .reset_index()
+        .merge(annot, how="left", left_on=left_on, right_on=TMP_KEY, validate="one_to_one")
     )
+    if annot_gene_id in var_annotated.columns:
+        var_annotated = var_annotated.drop(columns=TMP_KEY)
+    else:
+        var_annotated = var_annotated.rename(columns={TMP_KEY: annot_gene_id})
     var_annotated.set_index(TMP_INDEX_NAME, inplace=True)
     var_annotated.index.name = orig_index_name
     return var_annotated
