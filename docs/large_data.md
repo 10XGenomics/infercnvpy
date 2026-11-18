@@ -96,7 +96,7 @@ cell in the middle of the cells that fall into that row (as the full plot looks 
 {func}`~infercnvpy.pl.chromosome_heatmap_summary` computes the group means in the same way. `mode="legacy"` draws
 every cell with {func}`scanpy.pl.heatmap`, which needs the whole matrix in memory as a dense table.
 
-## Tools that need the CNV matrix in memory
+## Functions that need their input in memory
 
 A lazy `adata.obsm["X_cnv"]` (from `lazy=True`, or read with {func}`anndata.experimental.read_lazy`) works with these functions, which read it block
 by block:
@@ -104,12 +104,38 @@ by block:
 - {func}`infercnvpy.pl.chromosome_heatmap` and {func}`~infercnvpy.pl.chromosome_heatmap_summary` with `mode="fast"`,
 - {func}`infercnvpy.tl.cnv_score`.
 
-The other functions that read the CNV matrix need it in memory and raise an error otherwise:
-{func}`infercnvpy.tl.ithcna`, {func}`infercnvpy.tl.smooth_cnv`, {func}`infercnvpy.pl.spatial_cnv`, and the heatmaps with
-`mode="legacy"`. {func}`infercnvpy.tl.pca` passes the matrix to scanpy. {func}`~infercnvpy.tl.smooth_cnv` also returns
-a dense float32 matrix (cells x windows). Load the matrix before you call them:
+{func}`infercnvpy.tl.copy_number` also reads a dask or backed expression matrix block by block, and makes the same
+calls as in memory. On an AnnData from {func}`~anndata.experimental.read_lazy`, {func}`infercnvpy.tl.spatial_regions`
+and {func}`infercnvpy.io.genomic_position_from_gtf` give the same result as in memory.
+
+The other functions raise an error unless their input is in memory:
+
+- the CNV matrix `adata.obsm["X_cnv"]` for {func}`infercnvpy.tl.ithcna`, {func}`infercnvpy.tl.smooth_cnv`,
+  {func}`infercnvpy.pl.spatial_cnv`, {func}`infercnvpy.tl.pca` and the heatmaps with `mode="legacy"`,
+- the representation that {func}`infercnvpy.pp.neighbors` and {func}`infercnvpy.tl.tsne` read (`use_rep`, by default
+  the PCA `adata.obsm["X_cnv_pca"]`), and the CNV matrix when they compute the PCA,
+- the expression matrix (`adata.X`, or the layer you pass) for {func}`infercnvpy.tl.ithgex`, and the raw counts
+  (`adata.X`, or the layer you pass) for {func}`infercnvpy.tl.detectability`,
+- the neighborhood graph of {func}`infercnvpy.pp.neighbors` (in `adata.obsp`) for {func}`infercnvpy.tl.umap` and
+  {func}`infercnvpy.tl.leiden`,
+- the whole AnnData for {func}`infercnvpy.pl.umap` and {func}`infercnvpy.pl.tsne` on an AnnData from
+  {func}`anndata.experimental.read_lazy`,
+- the whole AnnData for {func}`infercnvpy.tl.umap` and {func}`infercnvpy.tl.tsne` on a backed AnnData, because scanpy
+  can't copy a backed AnnData.
+
+A backed AnnData keeps `obsm` and `obsp` in memory, so on a backed AnnData only {func}`infercnvpy.tl.ithgex`,
+{func}`infercnvpy.tl.detectability`, {func}`infercnvpy.tl.umap` and {func}`infercnvpy.tl.tsne` need it loaded.
+
+{func}`~infercnvpy.tl.smooth_cnv` also returns a dense float32 matrix (cells x windows). Load the input before you call
+these functions:
 
 ```python
 adata.obsm["X_cnv"] = adata.obsm["X_cnv"].compute()  # a dask array
-adata = adata.to_memory()  # an AnnData from read_lazy or a backed file
+adata.X = adata.X.compute()  # a dask expression matrix, or the same for the layer you pass
+graph = "cnv_neighbors_connectivities"  # the key of the graph that the error names
+adata.obsp[graph] = adata.obsp[graph].compute()
+adata = adata.to_memory()  # an AnnData from read_lazy or a backed file, including adata.X
 ```
+
+`adata.to_memory()` also loads the expression matrix, which can be the largest part of the data. Load single fields
+with `.compute()` where the error names one.

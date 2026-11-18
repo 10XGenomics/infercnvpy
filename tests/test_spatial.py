@@ -368,6 +368,14 @@ def test_spatial_cnv_panels(adata_spatial):
         assert ax.yaxis_inverted()
 
 
+def test_spatial_cnv_csr(adata_spatial):
+    """A CSR CNV matrix (`tl.infercnv` with `dynamic_threshold`) gives the plotted values of the dense one."""
+    [dense] = cnv.pl.spatial_cnv(adata_spatial, region="chr1", show=False).collections
+    adata_spatial.obsm["X_cnv"] = sp.csr_matrix(adata_spatial.obsm["X_cnv"])
+    [csr] = cnv.pl.spatial_cnv(adata_spatial, region="chr1", show=False).collections
+    np.testing.assert_allclose(csr.get_array(), dense.get_array(), rtol=1e-6)
+
+
 def test_spatial_cnv_saves_once(adata_spatial, tmp_path):
     settings = sc.settings.figdir, sc.settings.file_format_figs, sc.settings.autosave
     sc.settings.figdir, sc.settings.file_format_figs = tmp_path, "png"

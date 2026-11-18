@@ -7,7 +7,7 @@ import numpy as np
 import scanpy as sc
 from anndata import AnnData
 
-from infercnvpy._util import _as_df, _as_matrix
+from infercnvpy._util import _as_df, _as_matrix, _is_dask
 from infercnvpy.pl._chromosome_heatmap import CBAR_LABEL, _finish
 
 _REGION = re.compile(r"^(?P<chrom>[^:]+)(?::(?P<start>[\d_,]+)-(?P<end>[\d_,]+))?$")
@@ -91,7 +91,9 @@ def spatial_cnv(
         X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`obsm['X_{use_rep}']`")
         for r in regions:
             obs[f"{use_rep} {r}"] = np.asarray(X[:, _region_columns(adata, use_rep, r)].mean(axis=1)).ravel()
-    tmp = AnnData(obs=obs, uns=adata.uns)
+    # `read_lazy` gives the colors in `uns` (e.g. `uns["cell_type_colors"]`) as dask arrays, which scanpy can't read
+    uns = {k: v.compute() if _is_dask(v) and k.endswith("_colors") else v for k, v in adata.uns.items()}
+    tmp = AnnData(obs=obs, uns=uns)
     tmp.obsm[basis] = np.asarray(adata.obsm[basis])
     kwargs.setdefault("vcenter", [0] * len(regions) + [None] * len(colors))
     show, save, return_fig = (kwargs.pop(k, None) for k in ("show", "save", "return_fig"))

@@ -1,5 +1,7 @@
 import scanpy as sc
 
+from infercnvpy._util import _check_adata_in_memory
+
 from ._chromosome_heatmap import chromosome_heatmap, chromosome_heatmap_summary
 from ._detectability import detectability
 from ._spatial import spatial_cnv
@@ -23,6 +25,7 @@ def umap(adata, **kwargs):
     -------
     Whatever :func:`scanpy.pl.embedding` returns: `None`, or the axes if `show=False`.
     """
+    _check_adata_in_memory(adata, lazy=True)  # scanpy can't read the lazy `obs` and `obsm` of `read_lazy`
     return sc.pl.embedding(adata, "cnv_umap", **kwargs)
 
 
@@ -42,4 +45,5 @@ def tsne(adata, **kwargs):
     -------
     Whatever :func:`scanpy.pl.embedding` returns: `None`, or the axes if `show=False`.
     """
+    _check_adata_in_memory(adata, lazy=True)  # scanpy can't read the lazy `obs` and `obsm` of `read_lazy`
     return sc.pl.embedding(adata, "cnv_tsne", **kwargs)

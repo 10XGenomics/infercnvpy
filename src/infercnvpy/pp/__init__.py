@@ -3,7 +3,7 @@ from anndata import AnnData
 
 from infercnvpy import tl
 from infercnvpy._logging import log
-from infercnvpy._util import _copy_for_inplace_false, _deprecated_positional
+from infercnvpy._util import _as_matrix, _copy_for_inplace_false, _deprecated_positional
 
 __all__ = ["neighbors"]
 
@@ -71,5 +71,7 @@ def neighbors(
     if f"X_{use_rep}" not in adata.obsm and use_rep == "cnv_pca":
         tl.pca(adata)
         log.info("neighbors: computed X_cnv_pca with default parameters, as it was not in adata.obsm")
+    if f"X_{use_rep}" in adata.obsm:  # a lazy matrix raises the "load it first" error, not one from scanpy
+        _as_matrix(adata.obsm[f"X_{use_rep}"], f"`obsm['X_{use_rep}']`")
 
     return sc.pp.neighbors(adata, use_rep=f"X_{use_rep}", key_added=key_added, copy=copy, **kwargs)

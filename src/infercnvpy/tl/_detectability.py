@@ -576,7 +576,10 @@ def _counts(adata: AnnData, layer: str | None) -> sp.csr_matrix:
     """The raw counts as a canonical CSR matrix, after checking that they are counts."""
     if layer is not None and layer not in adata.layers:
         raise KeyError(f"`layer={layer!r}` is not in `adata.layers`.")
-    X = _kernel_ready(sp.csr_matrix(_as_matrix(adata.X if layer is None else adata.layers[layer], "the raw counts")))
+    field = "adata.X" if layer is None else f"adata.layers[{layer!r}]"
+    X = _kernel_ready(
+        sp.csr_matrix(_as_matrix(adata.X if layer is None else adata.layers[layer], f"the raw counts (`{field}`)"))
+    )
     _check_counts(X.data, "tl.detectability")
     return X
 

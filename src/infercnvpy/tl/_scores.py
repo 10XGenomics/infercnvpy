@@ -242,7 +242,8 @@ def ithgex(
             skip_file_prefixes=SKIP_OWN_FRAMES,
         )
         use_raw = False
-    X = _as_matrix(_choose_mtx_rep(adata, use_raw, layer))
+    field = f"adata.layers[{layer!r}]" if layer is not None else "adata.raw.X" if use_raw else "adata.X"
+    X = _as_matrix(_choose_mtx_rep(adata, use_raw, layer), f"the expression matrix (`{field}`)")
     return _ith(adata, X, groupby, key_added, inplace, n_jobs, n_pairs, random_state, exclude_self_pairs)
 
 

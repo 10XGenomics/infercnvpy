@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import scipy.sparse as sp
-from anndata import AnnData
+from anndata import AnnData, read_h5ad
 from scipy.special import logsumexp
 
 import infercnvpy as cnv
@@ -642,6 +642,22 @@ def test_copy_number_needs_counts(fmt):
             cnv.tl.copy_number(adata, n_jobs=1, inplace=False)
     adata.X = as_fmt(counts)
     cnv.tl.copy_number(adata, n_jobs=1, inplace=False)  # a small panel: undetermined, after the check
+
+
+@pytest.mark.parametrize("form", ["dask", "backed"])
+def test_copy_number_lazy_and_backed(form, tmp_path):
+    """Counts as a dask array of CSR blocks or in a backed h5ad give the in-memory labels and profiles."""
+    adata = _simulate()
+    kw = {"reference_key": "truth", "reference_cat": "normal", "n_jobs": 2, "inplace": False}
+    want = cnv.tl.copy_number(adata, **kw)
+    if form == "dask":
+        adata.X = da.from_array(adata.X, chunks=(90, -1), asarray=False)
+    else:
+        adata.write_h5ad(tmp_path / "a.h5ad")
+        adata = read_h5ad(tmp_path / "a.h5ad", backed="r")
+    got = cnv.tl.copy_number(adata, **kw)
+    pd.testing.assert_frame_equal(got[0], want[0])
+    np.testing.assert_allclose(got[1], want[1], rtol=1e-6)
 
 
 def test_copy_number_dense_and_strings():

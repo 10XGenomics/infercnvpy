@@ -21,7 +21,7 @@ from anndata import AnnData
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import njit, njit_parallel, numba_threads, prange
-from infercnvpy._util import _as_matrix, _listed, _obs_column, _params_for_uns, _reference_cells
+from infercnvpy._util import _as_matrix, _is_dask, _listed, _obs_column, _params_for_uns, _reference_cells
 
 
 @njit
@@ -127,7 +127,9 @@ def _graph(adata: AnnData, connectivity_key: str) -> sp.csr_matrix:
             "e.g. with `squidpy.gr.spatial_neighbors_knn(adata)` "
             '(install with `pip install "infercnvpy[spatial]"`).'
         )
-    G = adata.obsp[connectivity_key]
+    G: Any = adata.obsp[connectivity_key]
+    if _is_dask(G):  # `anndata.experimental.read_lazy`: the sparse cells x cells graph is small enough to load
+        G = G.compute()
     G = sp.csr_matrix(G, copy=True) if sp.issparse(G) else sp.csr_matrix(np.asarray(G))
     if (G.data < 0).any():
         raise ValueError(f"`adata.obsp[{connectivity_key!r}]` must have non-negative weights.")
