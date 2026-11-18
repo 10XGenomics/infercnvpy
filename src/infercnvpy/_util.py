@@ -80,6 +80,25 @@ def _obs_column(adata, key: str) -> pd.Series:
     return obs[key] if isinstance(obs, pd.DataFrame) else obs[[key]].to_memory()[key]
 
 
+def _reference_cells(adata, reference_key, reference_cat) -> np.ndarray | None:
+    """Which cells are reference (normal) cells, or `None` without a reference; checks the arguments.
+
+    Cells with `NaN` in the column are not reference cells.
+    """
+    if (reference_key is None) != (reference_cat is None):
+        raise ValueError("Give both `reference_key` and `reference_cat` for reference cells, or neither.")
+    if reference_key is None:
+        return None
+    if reference_key not in adata.obs.columns:
+        raise KeyError(f"`{reference_key}` is not a column of `adata.obs`.")
+    values = np.asarray(_obs_column(adata, reference_key))
+    present = set(pd.unique(values[pd.notna(values)]))
+    missing = [c for c in _as_list(reference_cat) if c not in present]
+    if missing:
+        raise ValueError(f"No cell has `{reference_key}` in {missing!r}. The column has {sorted(map(str, present))!r}.")
+    return np.isin(values, _as_list(reference_cat))
+
+
 def _choose_mtx_rep(adata, use_raw=False, layer=None):
     """Get gene expression from anndata depending on use_raw and layer."""
     is_layer = layer is not None

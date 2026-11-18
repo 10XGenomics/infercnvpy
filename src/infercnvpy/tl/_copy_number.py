@@ -31,11 +31,11 @@ from tqdm.auto import tqdm
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import n_kernel_chunks, numba_threads
-from infercnvpy._util import _as_list, _as_matrix, _check_counts, _listed, _params_for_uns
+from infercnvpy._util import _as_list, _as_matrix, _check_counts, _listed, _params_for_uns, _reference_cells
 from infercnvpy.tl import _copy_number_kernels as K
 from infercnvpy.tl._infercnv import NO_CHR_NAMES, _check_var, _natural_sort, _on_used_chromosomes, _Rows
 from infercnvpy.tl._infercnv_kernels import _group_sums_csr
-from infercnvpy.tl._spatial import _graph
+from infercnvpy.tl._spatial import _drop_cross_edges, _graph
 
 #: Cell-cycle genes of Tirosh et al. 2016 (S and G2/M phase), with the current symbols of renamed genes added.
 CELL_CYCLE_GENES = (
@@ -322,8 +322,9 @@ def copy_number(
         this mixture is part of the diploid expectation, so that spillover alone does not make them aneuploid.
     `adata.obs["copy_number_stability"]` : :class:`float`
         Share of the `n_restarts` fits whose call for the cell (aneuploid or diploid, without the spatial prior)
-        equals its label. 1 means that every fit makes the same call, and values near 0.5 mark cells whose call
-        depends on the k-means seed.
+        equals its label, in steps of `1 / n_restarts`. 1 means that every fit makes the same call. Lower values
+        mark cells whose call depends on the k-means seed or, with `connectivity_key`, whose label the spatial
+        prior changed against the fits.
     `adata.obsm["X_copy_number"]` : :class:`numpy.ndarray`
         Copy number log ratios (natural log, float32), cells x genomic bins: the posterior mixture of the clones'
         segment means, a continuous score. Cells that are `"not.defined"` or `"undetermined"` have 0 (no copy number
@@ -745,21 +746,6 @@ def _check_args(*, n_clusters, max_fit_cells, min_detection, segment_length, **a
         raise ValueError(f"`segment_length` must be positive, got {segment_length}.")
 
 
-def _reference_cells(adata, reference_key, reference_cat) -> np.ndarray | None:
-    """Which cells are reference (normal) cells, or `None` without a reference; checks the arguments."""
-    if (reference_key is None) != (reference_cat is None):
-        raise ValueError("Give both `reference_key` and `reference_cat` for reference cells, or neither.")
-    if reference_key is None:
-        return None
-    if reference_key not in adata.obs.columns:
-        raise KeyError(f"`{reference_key}` is not a column of `adata.obs`.")
-    values = np.asarray(adata.obs[reference_key])
-    missing = [c for c in _as_list(reference_cat) if c not in set(values)]
-    if missing:
-        raise ValueError(f"No cell has `{reference_key}` in {missing!r}.")
-    return np.isin(values, _as_list(reference_cat))
-
-
 def _neighbor_prior(G, cells, resp, lt, log_prior, ref, max_weight):
     """Posteriors with a spatial prior: each cell's prior mixes its type's prior with its neighbors' posteriors.
 
@@ -776,8 +762,7 @@ def _neighbor_prior(G, cells, resp, lt, log_prior, ref, max_weight):
     n, k = lt.shape
     G = G[cells][:, cells].tocsr()
     if ref is not None:
-        rows = np.repeat(np.arange(n), np.diff(G.indptr))
-        G.data = G.data * (ref[rows] == ref[G.indices])
+        _drop_cross_edges(G, ref)
     G.eliminate_zeros()
     lik = np.exp(lt - lt.max(axis=1, keepdims=True))
     base = np.exp(log_prior)

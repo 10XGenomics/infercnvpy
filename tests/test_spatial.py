@@ -56,6 +56,42 @@ def test_smooth_cnv_matches_scipy(graph_and_cnv, fmt, alpha, n_hops):
     np.testing.assert_array_equal(res[5], X[5])  # no neighbors: unchanged
 
 
+_REGRESSION_EXPECTED = {
+    1: [
+        [0.1111111, 0.0666667, -0.1777778],
+        [0.0666667, 0.0333333, -0.1],
+        [-0.0107143, 0.3, -0.0142857],
+        [-0.15, 0.3, 0.15],
+        [0.5, -0.4, 0.3],
+    ],
+    2: [
+        [0.0642857, 0.1037037, -0.1068783],
+        [0.0556878, 0.1333333, -0.0973545],
+        [-0.0407738, 0.2178572, 0.0202381],
+        [-0.0803571, 0.3, 0.0678571],
+        [0.5, -0.4, 0.3],
+    ],
+}
+
+
+@pytest.mark.parametrize("fmt", [np.asarray, sp.csr_matrix])
+@pytest.mark.parametrize("n_hops", [1, 2])
+def test_smooth_cnv_default_regression(fmt, n_hops):
+    """Default smoothing on a fixed weighted graph equals hard-coded values from before the reference mask.
+
+    The values were computed with `tl.smooth_cnv` at 45c58a5. Unlike `test_smooth_cnv_matches_scipy`, the test
+    fails if the kernel and `_reference` change together. Cell 4 has no neighbors and keeps its values.
+    """
+    X = np.array([[0.4, -0.2, 0.0], [0.1, 0.3, -0.5], [-0.3, 0.0, 0.2], [0.0, 0.6, 0.1], [0.5, -0.4, 0.3]], np.float32)
+    W = [[0, 1, 0.5, 0, 0], [1, 0, 1, 0, 0], [0.5, 1, 0, 2, 0], [0, 0, 2, 0, 0], [0, 0, 0, 0, 0]]
+    adata = AnnData(obs=pd.DataFrame(index=list("abcde")), obsm={"X_cnv": fmt(X)})
+    adata.obsp["spatial_connectivities"] = sp.csr_matrix(np.array(W, dtype=np.float32))
+    cnv.tl.smooth_cnv(adata, n_hops=n_hops)
+    np.testing.assert_allclose(adata.obsm["X_cnv_smoothed"], _REGRESSION_EXPECTED[n_hops], rtol=0, atol=1e-6)
+    params = adata.uns["cnv_smoothed"]["params"]
+    assert (params["reference_key"], params["reference_cat"]) == (None, None)
+
+
 def test_serial_twin_matches(graph_and_cnv):
     G, X = graph_and_cnv
     args = (G.indptr, G.indices, G.data, -1.0)
@@ -106,6 +142,83 @@ def test_smooth_cnv_errors(graph_and_cnv):
         cnv.tl.smooth_cnv(adata, alpha=2)
     with pytest.raises(ValueError, match="n_hops"):
         cnv.tl.smooth_cnv(adata, n_hops=0)
+
+
+def _masked_adata(G, X, fmt=np.asarray):
+    """AnnData with a tumor/non-tumor column: cells 0 to 99 tumor, 100 to 289 non-tumor, the rest NaN."""
+    status = pd.Series(["tumor"] * 100 + ["non-tumor"] * 190 + [None] * (X.shape[0] - 290), dtype="category")
+    obs = pd.DataFrame({"status": status.to_numpy()}, index=[str(i) for i in range(X.shape[0])])
+    adata = AnnData(obs=obs, obsm={"X_cnv": fmt(X)})
+    adata.obsp["spatial_connectivities"] = G
+    return adata
+
+
+@pytest.mark.parametrize("fmt", [np.asarray, sp.csr_matrix])
+def test_smooth_cnv_reference_mask(graph_and_cnv, fmt, caplog):
+    G, X = graph_and_cnv
+    adata = _masked_adata(G, X, fmt)
+    full = cnv.tl.smooth_cnv(adata, inplace=False)
+    np.testing.assert_array_equal(full, cnv.tl.smooth_cnv(adata, reference_key=None, reference_cat=None, inplace=False))
+    # the mask equals the graph built by hand with the recipe of the old docstring, bit for bit
+    ref = adata.obs["status"].eq("non-tumor").to_numpy()
+    M = G.copy()
+    M.data *= ref[np.repeat(np.arange(M.shape[0]), np.diff(M.indptr))] == ref[M.indices]
+    adata.obsp["masked"] = M
+    expected = cnv.tl.smooth_cnv(adata, connectivity_key="masked", inplace=False)
+    assert not np.array_equal(expected, full)
+    with caplog.at_level(logging.INFO, logger="scverse.infercnvpy"):
+        cnv.tl.smooth_cnv(adata, reference_key="status", reference_cat="non-tumor")
+    np.testing.assert_array_equal(adata.obsm["X_cnv_smoothed"], expected)
+    M.setdiag(0)
+    M.eliminate_zeros()
+    n_isolated = int((np.diff(M.indptr) == 0).sum())
+    assert n_isolated > 1  # cell 5 and cells that lost all their neighbors
+    assert any(f"{n_isolated} cells without neighbors" in r.getMessage() for r in caplog.records)
+    params = adata.uns["cnv_smoothed"]["params"]
+    assert (params["reference_key"], params["reference_cat"]) == ("status", "non-tumor")
+    # with two values and no NaN, either value as the reference gives the same mask
+    adata.obs["status"] = adata.obs["status"].fillna("non-tumor")
+    np.testing.assert_array_equal(
+        cnv.tl.smooth_cnv(adata, reference_key="status", reference_cat="non-tumor", inplace=False),
+        cnv.tl.smooth_cnv(adata, reference_key="status", reference_cat=["tumor"], inplace=False),
+    )
+    # a mask that keeps every edge changes nothing
+    np.testing.assert_array_equal(
+        full, cnv.tl.smooth_cnv(adata, reference_key="status", reference_cat=["tumor", "non-tumor"], inplace=False)
+    )
+
+
+def test_smooth_cnv_reference_mask_hand_built():
+    """A path 0-1-2-3 plus cell 4 joined only to 3: groups {0, 1, 4} and {2, 3} lose the edges 1-2 and 3-4."""
+    edges = [(0, 1), (1, 2), (2, 3), (3, 4)]
+    G = sp.coo_matrix((np.ones(4), np.array(edges).T), shape=(5, 5)).tocsr()
+    G = G + G.T
+    X = np.array([[1.0], [2.0], [4.0], [8.0], [16.0]], dtype=np.float32)
+    group = pd.Categorical(["n", "n", "t", "t", "n"])
+    adata = AnnData(obs=pd.DataFrame({"group": group}, index=list("abcde")), obsm={"X_cnv": X})
+    adata.obsp["spatial_connectivities"] = G
+    out = cnv.tl.smooth_cnv(adata, reference_key="group", reference_cat="n", inplace=False)
+    np.testing.assert_allclose(out.ravel(), [1.5, 1.5, 6.0, 6.0, 16.0])  # cell 4 has no neighbors left
+    swapped = cnv.tl.smooth_cnv(adata, reference_key="group", reference_cat=["t"], inplace=False)
+    np.testing.assert_array_equal(out, swapped)  # two groups: the mask doesn't depend on which one is the reference
+    adata.obs["group"] = pd.Categorical(["n", "n", None, None, "n"])  # NaN counts as non-reference
+    np.testing.assert_array_equal(
+        out, cnv.tl.smooth_cnv(adata, reference_key="group", reference_cat="n", inplace=False)
+    )
+
+
+def test_smooth_cnv_reference_mask_errors(graph_and_cnv):
+    G, X = graph_and_cnv
+    adata = _masked_adata(G, X)
+    with pytest.raises(ValueError, match="both `reference_key` and `reference_cat`"):
+        cnv.tl.smooth_cnv(adata, reference_key="status")
+    with pytest.raises(ValueError, match="both `reference_key` and `reference_cat`"):
+        cnv.tl.smooth_cnv(adata, reference_cat="tumor")
+    with pytest.raises(KeyError, match="`cell_type` is not a column"):
+        cnv.tl.smooth_cnv(adata, reference_key="cell_type", reference_cat="tumor")
+    with pytest.raises(ValueError, match=r"in \['normal'\]\. The column has \['non-tumor', 'tumor'\]"):
+        cnv.tl.smooth_cnv(adata, reference_key="status", reference_cat=["tumor", "normal"])
+    assert "X_cnv_smoothed" not in adata.obsm
 
 
 def _grid(side: int = 40, flip: float = 0.15, seed: int = 0):

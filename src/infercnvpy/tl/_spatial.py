@@ -11,6 +11,7 @@ CSR input is read in place and never densified. `_icm` runs sequential iterated 
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -20,7 +21,7 @@ from anndata import AnnData
 
 from infercnvpy._logging import log, log_result
 from infercnvpy._numba import njit, njit_parallel, numba_threads, prange
-from infercnvpy._util import _as_matrix, _obs_column, _params_for_uns
+from infercnvpy._util import _as_matrix, _listed, _obs_column, _params_for_uns, _reference_cells
 
 
 @njit
@@ -135,6 +136,12 @@ def _graph(adata: AnnData, connectivity_key: str) -> sp.csr_matrix:
     return G
 
 
+def _drop_cross_edges(G: sp.csr_matrix, ref: np.ndarray) -> None:
+    """Drop, in place, the edges of `G` between the cells where `ref` is True and the other cells."""
+    G.data *= ref[np.repeat(np.arange(G.shape[0]), np.diff(G.indptr))] == ref[G.indices]
+    G.eliminate_zeros()
+
+
 def smooth_cnv(
     adata: AnnData,
     *,
@@ -143,6 +150,8 @@ def smooth_cnv(
     key_added: str = "cnv_smoothed",
     alpha: float | None = None,
     n_hops: int = 1,
+    reference_key: str | None = None,
+    reference_cat: str | Sequence[str] | None = None,
     inplace: bool = True,
     n_jobs: int | None = None,
 ) -> np.ndarray | None:
@@ -180,20 +189,28 @@ def smooth_cnv(
     weight means a closer neighbor). Distances, e.g. `obsp["spatial_distances"]`, give the
     farthest neighbors the largest weight and are rejected.
 
-    A normal cell next to a tumor cell shares no copy number change with it, so smoothing over the full graph spreads
-    tumor signal into immune and stromal cells at the tumor edge and dilutes the tumor cells there. When the normal
-    cells are annotated (e.g. the reference cells of :func:`infercnvpy.tl.infercnv`), drop the edges between them and
-    the other cells; entries set to 0 are not edges. Edges among the normal cells stay, so that they are smoothed as
-    much as the other cells and a threshold set on them still fits::
+    A correctly annotated normal cell next to a tumor cell shares no copy number change with
+    it, so smoothing over the edge between them dilutes the tumor cell and moves tumor signal
+    into the normal cell. With `reference_key` and `reference_cat`, usually the same as in
+    :func:`infercnvpy.tl.infercnv`, the edges between the reference cells and the other cells
+    are dropped before smoothing. The edges within each of the two groups stay, so that
+    reference cells away from the tumor are smoothed like the other cells. Cells at the border
+    keep fewer neighbors, so with the default `alpha` their own profile weighs more. Cells left
+    without neighbors keep their unsmoothed values. The mask has two groups and not one per
+    cell type, so that tumor cells annotated as different types still share edges.
 
-        G = adata.obsp["spatial_connectivities"].tocsr(copy=True)
-        normal = adata.obs["cell_type"].isin(["immune", "endothelial", "fibroblast"]).to_numpy()
-        G.data *= normal[np.repeat(np.arange(G.shape[0]), np.diff(G.indptr))] == normal[G.indices]
-        adata.obsp["spatial_connectivities_masked"] = G
-        cnv.tl.smooth_cnv(adata, connectivity_key="spatial_connectivities_masked")
-
-    Use two groups, normal and the rest, rather than one group per cell type, so that tumor cells annotated as
-    different types still share edges. No mask separates normal cells from tumor cells of the same type.
+    The mask is only as good as the reference labels. Normal cells outside `reference_cat`
+    (e.g. normal epithelium next to a carcinoma, or cells with `NaN`) still share edges with
+    the tumor, and a tumor cell labeled as a reference type is smoothed with the reference
+    cells. The mask also does not remove tumor signal that a normal cell carries in its own
+    counts, e.g. from spillover or from a segmentation that merged it with a tumor cell. For a
+    threshold on the smoothed values, take reference cells far from the tumor (e.g. more than a
+    few cell diameters from any cell outside the reference) rather than all reference cells,
+    because those at the border can carry such signal. Even with the mask, more of the normal
+    cells at the border can pass such a threshold after smoothing than without smoothing,
+    because averaging them with their normal neighbors cuts the noise around the signal in
+    their own counts. A call at the border therefore needs evidence per cell beyond the CNV
+    profile, e.g. marker genes or morphology.
 
     Parameters
     ----------
@@ -209,10 +226,18 @@ def smooth_cnv(
         The result is stored in `adata.obsm["X_{key_added}"]` and `adata.uns[key_added]`.
     alpha
         Weight of the cell itself, between 0 and 1. Default: the cell counts as one more
-        neighbor, i.e. `1 / (n_neighbors + 1)`; with binary connectivities this is the plain
-        mean over the cell and its neighbors.
+        neighbor, i.e. `1 / (n_neighbors + 1)`, counting the neighbors left after the
+        reference mask; with binary connectivities this is the plain mean over the cell and its
+        neighbors.
     n_hops
         Number of smoothing steps.
+    reference_key
+        Column of `adata.obs` that annotates the normal (reference) cells. Give it together with
+        `reference_cat` to drop the edges between the reference cells and the other cells.
+        Default: smooth over the full graph.
+    reference_cat
+        One value or a list of values of `adata.obs[reference_key]` that mark the reference
+        cells. Cells with any other value or `NaN` form the other group.
     inplace
         If `True`, store the result in adata, otherwise return it.
     n_jobs
@@ -238,10 +263,14 @@ def smooth_cnv(
         raise ValueError(f"`alpha` must be between 0 and 1, got {alpha}.")
     if n_hops < 1:
         raise ValueError(f"`n_hops` must be at least 1, got {n_hops}.")
+    reference_cat = _listed(reference_cat)
+    ref = _reference_cells(adata, reference_key, reference_cat)
     G = _graph(adata, connectivity_key)
     X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`obsm['X_{use_rep}']`")
     if G.shape != (X.shape[0], X.shape[0]):
         raise ValueError(f"`adata.obsp[{connectivity_key!r}]` has shape {G.shape}, expected {(X.shape[0],) * 2}.")
+    if ref is not None:
+        _drop_cross_edges(G, ref)
 
     start = log.debug("smooth_cnv: %d cells x %d windows, %d hops", X.shape[0], X.shape[1], n_hops)
     graph = (G.indptr, G.indices, G.data.astype(np.float64, copy=False), -1.0 if alpha is None else float(alpha))
@@ -258,10 +287,13 @@ def smooth_cnv(
                 _hop_dense(*graph, out, buf)
                 out, buf = buf, out
     n_isolated = int(np.count_nonzero(np.diff(G.indptr) == 0))
+    report = n_isolated > 0 or reference_key is not None  # with the mask, report the count even if it is 0
     log_result(
         "smooth_cnv",
-        "smoothed %d cells over %d hops" + (", %d cells without neighbors kept their values" if n_isolated else ""),
-        *([X.shape[0], n_hops] + ([n_isolated] if n_isolated else [])),
+        "smoothed %d cells over %d hops"
+        + (" without the edges between reference and other cells" if reference_key is not None else "")
+        + (", %d cells without neighbors kept their values" if report else ""),
+        *([X.shape[0], n_hops] + ([n_isolated] if report else [])),
         time=start,
     )
 
@@ -269,7 +301,14 @@ def smooth_cnv(
         return out
     adata.obsm[f"X_{key_added}"] = out
     uns = {k: v for k, v in adata.uns.get(use_rep, {}).items() if k != "params"}
-    uns["params"] = _params_for_uns(use_rep=use_rep, connectivity_key=connectivity_key, alpha=alpha, n_hops=n_hops)
+    uns["params"] = _params_for_uns(
+        use_rep=use_rep,
+        connectivity_key=connectivity_key,
+        alpha=alpha,
+        n_hops=n_hops,
+        reference_key=reference_key,
+        reference_cat=reference_cat,
+    )
     adata.uns[key_added] = uns
     return None
 
