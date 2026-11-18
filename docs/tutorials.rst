@@ -8,3 +8,4 @@ Tutorials
    notebooks/tutorial_3k.ipynb
    notebooks/reproduce_infercnv.ipynb
    notebooks/spatial_xenium.ipynb
+   notebooks/spatial_atera.ipynb

@@ -19,3 +19,10 @@ datasets:
       - name: oligodendroglioma.h5ad
         s3_key: oligodendroglioma/oligodendroglioma.h5ad
         sha256: f1c5bf67613cabc6931b90f4a623bdd5ed7e32f574a98901f3f55b9d80523f5e
+  wu2026_atera_breast:
+    type: infercnvpy
+    shape: [43700, 18028]
+    files:
+      - name: wu2026_atera_breast.h5ad
+        s3_key: wu2026_atera_breast/wu2026_atera_breast.h5ad
+        sha256: 9709fad5eadd69b38d04976f57212480f7e16c7d0247fa5998e42d8a64de7986

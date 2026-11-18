@@ -191,4 +191,5 @@ e.g. `obsp["spatial_connectivities"]` from {func}`squidpy.gr.spatial_neighbors_k
 
     datasets.maynard2020_3k
     datasets.oligodendroglioma
+    datasets.wu2026_atera_breast
 ```
