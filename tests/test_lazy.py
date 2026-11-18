@@ -24,6 +24,12 @@ def expected(oligo):
     return cnv.tl.infercnv(oligo, **REF, calculate_gene_values=True, inplace=False)
 
 
+@pytest.fixture(scope="module")
+def expected_dense(oligo):
+    """In-memory result without a threshold (a dense array), with gene values."""
+    return cnv.tl.infercnv(oligo, **REF, dynamic_threshold=None, calculate_gene_values=True, inplace=False)
+
+
 def _with_X(oligo, X):
     return ad.AnnData(X=X, obs=oligo.obs.copy(), var=oligo.var.copy())
 
@@ -53,10 +59,12 @@ def _check(adata, expected, gene_values=True, **kw):
     chr_pos, res, gv = cnv.tl.infercnv(adata, **REF, calculate_gene_values=gene_values, inplace=False, **kw)
     if hasattr(res, "compute"):
         res, gv = dask.compute(res, gv)
-    assert isinstance(res, sp.csr_matrix)
+    dense = isinstance(expected[1], np.ndarray)  # the result of `dynamic_threshold=None`
+    assert isinstance(res, np.ndarray if dense else sp.csr_matrix)
     assert res.dtype == np.float32
     assert chr_pos == expected[0]
-    np.testing.assert_allclose(res.toarray(), expected[1].toarray(), rtol=1e-5, atol=1e-6)
+    want = expected[1] if dense else expected[1].toarray()
+    np.testing.assert_allclose(res if dense else res.toarray(), want, rtol=1e-5, atol=1e-6)
     if gene_values:
         np.testing.assert_allclose(gv, expected[2], rtol=1e-5, atol=1e-6)
     return res
@@ -80,15 +88,18 @@ def test_dask_layer(oligo, expected):
 
 
 @pytest.mark.parametrize("fmt", ["csr", "dense"])
-def test_backed_h5ad(oligo, expected, tmp_path, fmt):
+def test_backed_h5ad(oligo, expected, expected_dense, tmp_path, fmt):
     X = sp.csr_matrix(oligo.X) if fmt == "csr" else oligo.X.toarray()
     path = tmp_path / "a.h5ad"
     _with_X(oligo, X).write_h5ad(path)
     a = ad.read_h5ad(path, backed="r")
     assert a.isbacked
     _check(a, expected, chunksize=60)
+    _check(a, expected_dense, chunksize=60, dynamic_threshold=None)
     cnv.tl.infercnv(a, **REF, chunksize=60)
     assert isinstance(a.obsm["X_cnv"], sp.csr_matrix)
+    cnv.tl.infercnv(a, **REF, chunksize=60, dynamic_threshold=None)
+    assert isinstance(a.obsm["X_cnv"], np.ndarray)
 
 
 def test_backed_csc_is_read_once(oligo, expected, tmp_path, monkeypatch):
@@ -179,10 +190,11 @@ def test_lazy_is_opt_in(oligo):
     assert isinstance(a.obsm["X_cnv"], sp.csr_matrix)
 
 
-def test_tools_that_need_cnv_in_memory(oligo):
+@pytest.mark.parametrize("dynamic_threshold", [None, 1.5])  # dense or CSR blocks
+def test_tools_that_need_cnv_in_memory(oligo, dynamic_threshold):
     """Tools without block-wise reading tell the user to load a lazy CNV matrix; cnv_score reads it block by block."""
     a = _with_X(oligo, _csr_blocks(oligo, 100))
-    cnv.tl.infercnv(a, **REF, lazy=True)
+    cnv.tl.infercnv(a, **REF, lazy=True, dynamic_threshold=dynamic_threshold)
     eager = a.copy()
     eager.obsm["X_cnv"] = eager.obsm["X_cnv"].compute()
     a.obsm["spatial"] = np.random.default_rng(0).random((a.n_obs, 2))
@@ -191,9 +203,13 @@ def test_tools_that_need_cnv_in_memory(oligo):
         lambda: cnv.tl.ithcna(a, groupby="cell_type"),
         lambda: cnv.tl.smooth_cnv(a),
         lambda: cnv.pl.spatial_cnv(a, region="chr1", show=False),
+        lambda: cnv.pl.chromosome_heatmap(a, groupby="cell_type", mode="legacy", show=False),
+        lambda: cnv.pl.chromosome_heatmap_summary(a, groupby="cell_type", mode="legacy", show=False),
     ]
     for call in calls:
-        with pytest.raises(TypeError, match=r"needs `obsm\['X_cnv'\]` in memory, got a dask array.*\.compute\(\)"):
+        with pytest.raises(
+            TypeError, match=r"needs `(adata\.)?obsm\['X_cnv'\]` in memory, got a dask array.*\.compute\(\)"
+        ):
             call()
     assert cnv.tl.cnv_score(a, groupby="cell_type", inplace=False) == pytest.approx(
         cnv.tl.cnv_score(eager, groupby="cell_type", inplace=False)
@@ -205,7 +221,10 @@ def test_lazy_without_threshold(oligo, expected):
         _with_X(oligo, _csr_blocks(oligo, 50)), **REF, dynamic_threshold=None, lazy=True, inplace=False
     )
     want = cnv.tl.infercnv(oligo, **REF, dynamic_threshold=None, inplace=False)[1]
-    np.testing.assert_allclose(res[1].compute().toarray(), want.toarray(), rtol=1e-5, atol=1e-5)
+    got = res[1].compute()
+    assert isinstance(got, np.ndarray)
+    assert isinstance(want, np.ndarray)
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
 
 
 def test_lazily_normalised_table(oligo):
@@ -246,12 +265,15 @@ def test_read_elem_lazy(oligo, expected, zarr_store):
     _check(ad.AnnData(X=X, obs=ad.io.read_elem(f["obs"]), var=ad.io.read_elem(f["var"])), expected)
 
 
-def test_read_lazy(expected, zarr_store):
+def test_read_lazy(expected, expected_dense, zarr_store):
     """`anndata.experimental.read_lazy`: `obs` and `var` are lazy too."""
     a = ad.experimental.read_lazy(zarr_store)
     _check(a, expected)
+    _check(a, expected_dense, dynamic_threshold=None)
     cnv.tl.infercnv(a, **REF)
     assert isinstance(a.obsm["X_cnv"], sp.csr_matrix)
+    cnv.tl.infercnv(a, **REF, dynamic_threshold=None)
+    assert isinstance(a.obsm["X_cnv"], np.ndarray)
 
 
 def test_read_lazy_downstream(oligo, tmp_path):

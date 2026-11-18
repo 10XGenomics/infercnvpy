@@ -285,6 +285,28 @@ def test_leiden_no_flavor_warning(adata_cnv_neighbors):
     assert adata_cnv_neighbors.obs["cnv_leiden"].nunique() > 1
 
 
+def test_tools_accept_a_dense_x_cnv(adata_oligodendroglioma):
+    """The tools and plots that read X_cnv work on the dense array of `dynamic_threshold=None`."""
+    adata = adata_oligodendroglioma
+    ref = {"reference_key": "cell_type", "reference_cat": ["Microglia/Macrophage", "Oligodendrocytes (non-malignant)"]}
+    cnv.tl.infercnv(adata, **ref, dynamic_threshold=None)
+    assert isinstance(adata.obsm["X_cnv"], np.ndarray)
+    cnv.tl.pca(adata)
+    cnv.pp.neighbors(adata)
+    cnv.tl.leiden(adata)
+    cnv.tl.umap(adata)
+    cnv.tl.cnv_score(adata)
+    cnv.tl.ithcna(adata, groupby="cell_type")
+    adata.obsm["spatial"] = np.random.default_rng(0).random((adata.n_obs, 2))
+    adata.obsp["spatial_connectivities"] = knn_graph(adata.obsm["spatial"])
+    cnv.tl.smooth_cnv(adata, **ref)
+    for mode in ("fast", "legacy"):
+        cnv.pl.chromosome_heatmap(adata, groupby="cell_type", mode=mode, show=False)
+        cnv.pl.chromosome_heatmap_summary(adata, groupby="cell_type", mode=mode, show=False)
+    assert {"X_cnv_pca", "X_cnv_umap", "X_cnv_smoothed"} <= set(adata.obsm)
+    assert {"cnv_leiden", "cnv_score", "ithcna"} <= set(adata.obs)
+
+
 def test_layer_parameter(adata_oligodendroglioma):
 
     # create lognorm layer but leave X unchanged

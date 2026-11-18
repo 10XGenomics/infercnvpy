@@ -56,9 +56,15 @@ def test_infercnv_mean_reference_warns(adata_full_mock):
     assert record[0].filename == __file__
 
 
+@pytest.mark.parametrize("dynamic_threshold", [None, 1.5])  # a dense or a CSR X_cnv
 @pytest.mark.parametrize("func", [cnv.pp.neighbors, cnv.tl.tsne])
-def test_auto_pca_is_info(adata_oligodendroma, caplog, func):
-    cnv.tl.infercnv(adata_oligodendroma, reference_key="cell_type", reference_cat="Microglia/Macrophage")
+def test_auto_pca_is_info(adata_oligodendroma, caplog, func, dynamic_threshold):
+    cnv.tl.infercnv(
+        adata_oligodendroma,
+        reference_key="cell_type",
+        reference_cat="Microglia/Macrophage",
+        dynamic_threshold=dynamic_threshold,
+    )
     with caplog.at_level(logging.INFO, logger=LOGGER):
         func(adata_oligodendroma)
     assert _messages(caplog) == [

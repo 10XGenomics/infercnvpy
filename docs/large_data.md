@@ -35,11 +35,12 @@ float32 values for the block being processed (and, for lazy data, the blocks tha
 ## Threads and dask schedulers
 
 By default, the next blocks are read in background threads (with the synchronous scheduler for a dask array) while
-the current block is processed with `n_jobs` threads on the main thread. The result, `adata.obsm["X_cnv"]`, is an in-memory
-sparse matrix with 8 bytes per value that is not removed as noise, so its size depends on the fraction of values that
-the noise filter keeps (`adata.obsm["X_cnv"].nnz` values).
+the current block is processed with `n_jobs` threads on the main thread. The result, `adata.obsm["X_cnv"]`, is in
+memory. With `dynamic_threshold=None`, it is a dense array with 4 bytes for every value. Otherwise it is a CSR matrix
+with 8 bytes (12 above 2^31 values) for each value that the noise filter keeps (`adata.obsm["X_cnv"].nnz` values).
 
-With `lazy=True`, the result for a dask array stays a dask array of CSR blocks, computed with
+With `lazy=True`, the result for a dask array stays a dask array of CSR blocks (dense blocks with
+`dynamic_threshold=None`), computed with
 {meth}`dask.array.Array.map_blocks`. The noise band is computed first, with one dask computation. `lazy=True` has to
 be passed explicitly, also when a {class}`distributed.Client` is active. In this mode the dask scheduler decides how
 many blocks run at the same time, each in a single thread, and `n_jobs` is ignored. infercnvpy never starts numba
