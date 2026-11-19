@@ -203,7 +203,6 @@ def test_tools_that_need_cnv_in_memory(oligo, dynamic_threshold):
     a.obsp["spatial_connectivities"] = sp.eye(a.n_obs, format="csr")
     calls = [
         lambda: cnv.tl.ithcna(a, groupby="cell_type"),
-        lambda: cnv.tl.smooth_cnv(a),
         lambda: cnv.pl.spatial_cnv(a, region="chr1", show=False),
         lambda: cnv.pl.chromosome_heatmap(a, groupby="cell_type", mode="legacy", show=False),
         lambda: cnv.pl.chromosome_heatmap_summary(a, groupby="cell_type", mode="legacy", show=False),
@@ -342,7 +341,7 @@ def test_read_lazy_downstream(oligo, tmp_path):
 
 
 def test_read_lazy_spatial(oligo, tmp_path):
-    """The spatial tools read the lazy graph, `obs` and colors of `read_lazy`; smooth_cnv needs `X_cnv` in memory."""
+    """The spatial tools read the lazy graph, `obs` and colors of `read_lazy`; spatial_cnv needs `X_cnv` in memory."""
     b = oligo.copy()
     cnv.tl.infercnv(b, **REF)
     b.obs["cell_type"] = b.obs["cell_type"].astype("category")
@@ -358,13 +357,9 @@ def test_read_lazy_spatial(oligo, tmp_path):
         cnv.tl.spatial_regions(b, key="cell_type", inplace=False),
         check_names=False,  # older anndata's read_lazy drops the index name
     )
-    for call in (lambda: cnv.tl.smooth_cnv(a), lambda: cnv.pl.spatial_cnv(a, region="chr1", show=False)):
-        with pytest.raises(TypeError, match=r"needs `obsm\['X_cnv'\]` in memory"):
-            call()
+    with pytest.raises(TypeError, match=r"needs `obsm\['X_cnv'\]` in memory"):
+        cnv.pl.spatial_cnv(a, region="chr1", show=False)
     a.obsm["X_cnv"] = a.obsm["X_cnv"].compute()
-    cnv.tl.smooth_cnv(a, **REF)
-    cnv.tl.smooth_cnv(b, **REF)
-    np.testing.assert_array_equal(a.obsm["X_cnv_smoothed"], b.obsm["X_cnv_smoothed"])
     [[lazy, lazy_types], [eager, eager_types]] = (
         [ax.collections[0] for ax in cnv.pl.spatial_cnv(x, region="chr1", color="cell_type", show=False)]
         for x in (a, b)

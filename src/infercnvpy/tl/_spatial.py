@@ -1,17 +1,13 @@
-"""Spatial tools: smooth a CNV matrix over a spatial neighbor graph, and regularize labels with a Potts prior.
+"""Spatial tool: regularize labels with a Potts prior over a spatial neighbor graph.
 
-Both read the graph from `adata.obsp`, e.g. `obsp["spatial_connectivities"]` from :func:`squidpy.gr.spatial_neighbors_knn`;
-infercnvpy itself does not depend on squidpy.
-
-`_hop_csr` / `_hop_dense` compute one smoothing step ``out = S @ X`` with ``S = diag(a) + diag((1 - a) / d) @ A``
-(`A` the graph without its diagonal, `d` its row sums, `a` the self weight per cell) without forming `S`: the row
-normalization and the self weight are applied on the fly while each output row gathers its neighbors' rows, so a
-CSR input is read in place and never densified. `_icm` runs sequential iterated conditional modes sweeps.
+It reads the graph from `adata.obsp`, e.g. `obsp["spatial_connectivities"]` from
+:func:`squidpy.gr.spatial_neighbors_knn`; infercnvpy itself does not depend on squidpy. `_icm` runs sequential iterated
+conditional modes sweeps. `_graph` and `_drop_cross_edges` also build the neighbor prior of
+:func:`~infercnvpy.tl.copy_number`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
@@ -20,57 +16,8 @@ import scipy.sparse as sp
 from anndata import AnnData
 
 from infercnvpy._logging import log, log_result
-from infercnvpy._numba import njit, njit_parallel, numba_threads, prange
-from infercnvpy._util import _as_matrix, _is_dask, _listed, _obs_column, _params_for_uns, _reference_cells
-
-
-@njit
-def _row_weights(g_indptr, g_indices, g_data, i, alpha):
-    """Self weight `a` and neighbor scale `(1 - a) / d` of cell `i` (diagonal entries of the graph are ignored)."""
-    d = 0.0
-    deg = 0
-    for e in range(g_indptr[i], g_indptr[i + 1]):
-        if g_indices[e] != i:
-            d += g_data[e]
-            deg += 1
-    if d <= 0:  # no neighbors: keep the cell's own values
-        return 1.0, 0.0
-    a = alpha if alpha >= 0 else 1.0 / (deg + 1)
-    return a, (1.0 - a) / d
-
-
-@njit_parallel
-def _hop_csr(g_indptr, g_indices, g_data, alpha, indptr, indices, data, out):  # pragma: no cover
-    """`out = S @ X` for the CSR matrix `X` (`indptr`, `indices`, `data`), see the module docstring."""
-    for i in prange(out.shape[0]):
-        a, scale = _row_weights(g_indptr, g_indices, g_data, i, alpha)
-        row = out[i]
-        row[:] = 0
-        for k in range(indptr[i], indptr[i + 1]):
-            row[indices[k]] += a * data[k]
-        for e in range(g_indptr[i], g_indptr[i + 1]):
-            j = g_indices[e]
-            if j != i:
-                w = scale * g_data[e]
-                for k in range(indptr[j], indptr[j + 1]):
-                    row[indices[k]] += w * data[k]
-
-
-@njit_parallel
-def _hop_dense(g_indptr, g_indices, g_data, alpha, X, out):  # pragma: no cover
-    """`out = S @ X` for the dense matrix `X`."""
-    n_cols = X.shape[1]
-    for i in prange(out.shape[0]):
-        a, scale = _row_weights(g_indptr, g_indices, g_data, i, alpha)
-        row = out[i]
-        for c in range(n_cols):
-            row[c] = a * X[i, c]
-        for e in range(g_indptr[i], g_indptr[i + 1]):
-            j = g_indices[e]
-            if j != i:
-                w = scale * g_data[e]
-                for c in range(n_cols):
-                    row[c] += w * X[j, c]
+from infercnvpy._numba import njit
+from infercnvpy._util import _is_dask, _obs_column, _params_for_uns
 
 
 @njit
@@ -142,182 +89,6 @@ def _drop_cross_edges(G: sp.csr_matrix, ref: np.ndarray) -> None:
     """Drop, in place, the edges of `G` between the cells where `ref` is True and the other cells."""
     G.data *= ref[np.repeat(np.arange(G.shape[0]), np.diff(G.indptr))] == ref[G.indices]
     G.eliminate_zeros()
-
-
-def smooth_cnv(
-    adata: AnnData,
-    *,
-    use_rep: str = "cnv",
-    connectivity_key: str = "spatial_connectivities",
-    key_added: str = "cnv_smoothed",
-    alpha: float | None = None,
-    n_hops: int = 1,
-    reference_key: str | None = None,
-    reference_cat: str | Sequence[str] | None = None,
-    inplace: bool = True,
-    n_jobs: int | None = None,
-) -> np.ndarray | None:
-    r"""Smooth a CNV matrix over a spatial neighbor graph.
-
-    Each cell's CNV profile is replaced by a weighted mean of its own profile and those of its
-    neighbors in the graph `adata.obsp[connectivity_key]`. One step is
-
-    .. math::
-
-        y_i = a_i x_i + (1 - a_i) \frac{\sum_j w_{ij} x_j}{\sum_j w_{ij}}
-
-    with the graph weights :math:`w_{ij}` (the diagonal is ignored) and the self weight
-    :math:`a_i` (`alpha`). With `n_hops > 1` the step is repeated on its own output, which
-    widens the neighborhood to cells up to `n_hops` edges away. Cells without neighbors keep
-    their values.
-
-    On imaging-based spatial data (Xenium, CosMx, ...) a cell has a few hundred counts from a
-    gene panel, so single-cell CNV profiles are noisy. Neighboring cells in a tumor usually
-    share the same copy number state, and averaging over them recovers the signal. Related
-    methods average before the CNV inference instead. InSituCNV :cite:`Jensen2025` smooths the
-    normalized expression over a kNN graph of expression similarity and then runs infercnvpy,
-    and SlideCNA :cite:`Zhang2025` pools the expression of neighboring beads. Han et al.
-    :cite:`Han2026` found that aggregating cells on a grid improved CNV recovery on imaging
-    platforms compared to native single-cell resolution. Smoothing also blurs the boundary
-    between tumor and normal tissue by about `n_hops` cells.
-
-    By default, :func:`infercnvpy.tl.infercnv` sets the values in its noise band to 0, and
-    this function averages those zeros together with the values outside the band. To smooth the
-    unfiltered values, run `tl.infercnv(..., dynamic_threshold=None)`.
-
-    The graph usually comes from :func:`squidpy.gr.spatial_neighbors_knn`, e.g.
-    `sq.gr.spatial_neighbors_knn(adata, n_neighs=10)`, or from
-    :func:`squidpy.gr.spatial_neighbors_delaunay`. Any cells x cells graph with non-negative
-    weights works, as long as the weights are similarities or binary connectivities (a larger
-    weight means a closer neighbor). Distances, e.g. `obsp["spatial_distances"]`, give the
-    farthest neighbors the largest weight and are rejected.
-
-    A correctly annotated normal cell next to a tumor cell shares no copy number change with
-    it, so smoothing over the edge between them dilutes the tumor cell and moves tumor signal
-    into the normal cell. With `reference_key` and `reference_cat`, usually the same as in
-    :func:`infercnvpy.tl.infercnv`, the edges between the reference cells and the other cells
-    are dropped before smoothing. The edges within each of the two groups stay, so that
-    reference cells away from the tumor are smoothed like the other cells. Cells at the border
-    keep fewer neighbors, so with the default `alpha` their own profile weighs more. Cells left
-    without neighbors keep their unsmoothed values. The mask has two groups and not one per
-    cell type, so that tumor cells annotated as different types still share edges.
-
-    The mask is only as good as the reference labels. Normal cells outside `reference_cat`
-    (e.g. normal epithelium next to a carcinoma, or cells with `NaN`) still share edges with
-    the tumor, and a tumor cell labeled as a reference type is smoothed with the reference
-    cells. The mask also does not remove tumor signal that a normal cell carries in its own
-    counts, e.g. from spillover or from a segmentation that merged it with a tumor cell. Before
-    you set a threshold on the smoothed values, compare the reference cells near the tumor with
-    those far from it in two ways. First, compare their unsmoothed values, which include the
-    cells right at the border. Second, compare their smoothed values among cells with the same
-    number of neighbors after the mask, because reference cells at the border keep fewer
-    neighbors, so their smoothed values are noisier and score higher even without tumor signal.
-    Take the threshold from the far reference cells only if the near ones score higher in one
-    of these comparisons, because then they carry tumor signal in their own counts. Even with
-    the mask, more of the normal cells at the border can pass a threshold after smoothing than
-    without smoothing, because averaging them with their normal neighbors cuts the noise around
-    the signal in their own counts. A call at the border therefore needs evidence per cell
-    beyond the CNV profile, e.g. marker genes or morphology.
-
-    Parameters
-    ----------
-    adata
-        Annotated data matrix.
-    use_rep
-        Smooth `adata.obsm["X_{use_rep}"]`, e.g. the result of :func:`infercnvpy.tl.infercnv`.
-        A numpy array or a scipy sparse matrix; a CSR matrix is read in place.
-    connectivity_key
-        Key of the cells x cells graph in `adata.obsp`: connectivities or similarities, not
-        distances.
-    key_added
-        The result is stored in `adata.obsm["X_{key_added}"]` and `adata.uns[key_added]`.
-    alpha
-        Weight of the cell itself, between 0 and 1. Default: the cell counts as one more
-        neighbor, i.e. `1 / (n_neighbors + 1)`, counting the neighbors left after the
-        reference mask; with binary connectivities this is the plain mean over the cell and its
-        neighbors.
-    n_hops
-        Number of smoothing steps.
-    reference_key
-        Column of `adata.obs` that annotates the normal (reference) cells. Give it together with
-        `reference_cat` to drop the edges between the reference cells and the other cells.
-        Default: smooth over the full graph.
-    reference_cat
-        One value or a list of values of `adata.obs[reference_key]` that mark the reference
-        cells. Cells with any other value or `NaN` form the other group.
-    inplace
-        If `True`, store the result in adata, otherwise return it.
-    n_jobs
-        Number of threads. Default: all cores (numba's setting, see :func:`numba.set_num_threads`).
-
-    Returns
-    -------
-    If `inplace=True`, returns `None` and sets the fields below.
-    Otherwise returns the smoothed matrix.
-    Sets the following fields:
-
-    `adata.obsm["X_{key_added}"]` : :class:`numpy.ndarray`
-        Smoothed CNV values (float32), cells x windows. Dense, as smoothing fills in the zeros
-        of a sparse CNV matrix.
-    `adata.uns[key_added]` : :class:`dict`
-        The entries of `adata.uns[use_rep]` (e.g. `chr_pos`, so that
-        :func:`infercnvpy.pl.chromosome_heatmap` works with `use_rep=key_added`), with `params`
-        replaced by the parameters of this call.
-    """
-    if f"X_{use_rep}" not in adata.obsm:
-        raise KeyError(f"`adata.obsm['X_{use_rep}']` not found. Did you run `tl.infercnv`?")
-    if alpha is not None and not 0 <= alpha <= 1:
-        raise ValueError(f"`alpha` must be between 0 and 1, got {alpha}.")
-    if n_hops < 1:
-        raise ValueError(f"`n_hops` must be at least 1, got {n_hops}.")
-    reference_cat = _listed(reference_cat)
-    ref = _reference_cells(adata, reference_key, reference_cat)
-    G = _graph(adata, connectivity_key)
-    X = _as_matrix(adata.obsm[f"X_{use_rep}"], f"`obsm['X_{use_rep}']`")
-    if G.shape != (X.shape[0], X.shape[0]):
-        raise ValueError(f"`adata.obsp[{connectivity_key!r}]` has shape {G.shape}, expected {(X.shape[0],) * 2}.")
-    if ref is not None:
-        _drop_cross_edges(G, ref)
-
-    start = log.debug("smooth_cnv: %d cells x %d windows, %d hops", X.shape[0], X.shape[1], n_hops)
-    graph = (G.indptr, G.indices, G.data.astype(np.float64, copy=False), -1.0 if alpha is None else float(alpha))
-    out = np.empty(X.shape, dtype=np.float32)
-    with numba_threads(n_jobs):
-        if sp.issparse(X):
-            X = sp.csr_matrix(X)
-            _hop_csr(*graph, X.indptr, X.indices, X.data, out)
-        else:
-            _hop_dense(*graph, np.ascontiguousarray(X), out)
-        if n_hops > 1:
-            buf = np.empty_like(out)
-            for _ in range(n_hops - 1):
-                _hop_dense(*graph, out, buf)
-                out, buf = buf, out
-    n_isolated = int(np.count_nonzero(np.diff(G.indptr) == 0))
-    report = n_isolated > 0 or reference_key is not None  # with the mask, report the count even if it is 0
-    log_result(
-        "smooth_cnv",
-        "smoothed %d cells over %d hops"
-        + (" without the edges between reference and other cells" if reference_key is not None else "")
-        + (", %d cells without neighbors kept their values" if report else ""),
-        *([X.shape[0], n_hops] + ([n_isolated] if report else [])),
-        time=start,
-    )
-
-    if not inplace:
-        return out
-    adata.obsm[f"X_{key_added}"] = out
-    uns = {k: v for k, v in adata.uns.get(use_rep, {}).items() if k != "params"}
-    uns["params"] = _params_for_uns(
-        use_rep=use_rep,
-        connectivity_key=connectivity_key,
-        alpha=alpha,
-        n_hops=n_hops,
-        reference_key=reference_key,
-        reference_cat=reference_cat,
-    )
-    adata.uns[key_added] = uns
-    return None
 
 
 def spatial_regions(

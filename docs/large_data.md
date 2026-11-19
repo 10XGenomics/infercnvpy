@@ -110,8 +110,8 @@ and {func}`infercnvpy.io.genomic_position_from_gtf` give the same result as in m
 
 The other functions raise an error unless their input is in memory:
 
-- the CNV matrix `adata.obsm["X_cnv"]` for {func}`infercnvpy.tl.ithcna`, {func}`infercnvpy.tl.smooth_cnv`,
-  {func}`infercnvpy.pl.spatial_cnv`, {func}`infercnvpy.tl.pca` and the heatmaps with `mode="legacy"`,
+- the CNV matrix `adata.obsm["X_cnv"]` for {func}`infercnvpy.tl.ithcna`, {func}`infercnvpy.pl.spatial_cnv`,
+  {func}`infercnvpy.tl.pca` and the heatmaps with `mode="legacy"`,
 - the representation that {func}`infercnvpy.pp.neighbors` and {func}`infercnvpy.tl.tsne` read (`use_rep`, by default
   the PCA `adata.obsm["X_cnv_pca"]`), and the CNV matrix when they compute the PCA,
 - the expression matrix (`adata.X`, or the layer you pass) for {func}`infercnvpy.tl.ithgex`, and the raw counts
@@ -126,8 +126,7 @@ The other functions raise an error unless their input is in memory:
 A backed AnnData keeps `obsm` and `obsp` in memory, so on a backed AnnData only {func}`infercnvpy.tl.ithgex`,
 {func}`infercnvpy.tl.detectability`, {func}`infercnvpy.tl.umap` and {func}`infercnvpy.tl.tsne` need it loaded.
 
-{func}`~infercnvpy.tl.smooth_cnv` also returns a dense float32 matrix (cells x windows). Load the input before you call
-these functions:
+Load the input before you call these functions:
 
 ```python
 adata.obsm["X_cnv"] = adata.obsm["X_cnv"].compute()  # a dask array

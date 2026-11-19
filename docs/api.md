@@ -72,7 +72,8 @@ Which function to use:
   `connectivity_key` lets each cell's spatial neighbors inform its call. With fewer than 1,000 usable genes (small
   panels such as Xenium 480) or a median below 150 counts per cell, it labels the cells `"undetermined"` instead of
   calling them. There, run {func}`~infercnvpy.tl.detectability` to see which arms the panel can resolve, and then
-  `tl.infercnv` with {func}`~infercnvpy.tl.smooth_cnv`.
+  `tl.infercnv` with reference cells, and read groups of cells rather than single cells, as in the
+  {doc}`Xenium tutorial <notebooks/spatial_xenium>`.
 
 `tl.infercnv` and `tl.copy_number` write their profiles to `adata.obsm` and `adata.uns` in the same layout, so the
 plots, scores, embeddings and spatial tools below accept the output of either (`use_rep="cnv"` or
@@ -111,7 +112,6 @@ e.g. `obsp["spatial_connectivities"]` from {func}`squidpy.gr.spatial_neighbors_k
 .. autosummary::
     :toctree: generated
 
-    tl.smooth_cnv
     tl.spatial_regions
 ```
 

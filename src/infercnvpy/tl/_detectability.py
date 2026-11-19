@@ -241,7 +241,8 @@ def detectability(
 
     **Small panels.** On panels with fewer than 1,000 usable genes or below a median of 150 counts per cell,
     `tl.copy_number` labels the cells "undetermined". Use `tl.detectability` to see which arms the panel can resolve,
-    and then :func:`infercnvpy.tl.infercnv` with :func:`infercnvpy.tl.smooth_cnv`. The calls of
+    and then :func:`infercnvpy.tl.infercnv` with reference cells, reading groups of cells such as the regions of
+    :func:`infercnvpy.tl.spatial_regions` rather than single cells. The calls of
     `tl.copy_number(force_calls=True)` are not calibrated on such panels.
 
     Examples

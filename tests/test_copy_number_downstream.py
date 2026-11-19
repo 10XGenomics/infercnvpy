@@ -39,9 +39,6 @@ def test_embedding_clustering_and_scores(adata_cn):
 
 def test_spatial(adata_cn):
     a = adata_cn.copy()
-    cnv.tl.smooth_cnv(a, use_rep="copy_number", key_added="cn_smoothed")
-    assert a.obsm["X_cn_smoothed"].shape == a.obsm["X_copy_number"].shape
-    assert a.uns["cn_smoothed"]["chr_pos"] == a.uns["copy_number"]["chr_pos"]
     cnv.tl.spatial_regions(a, key="copy_number_clone", key_added="cn_regions")
     assert a.obs["cn_regions"].notna().all()
     cnv.pl.spatial_cnv(a, region="chr1:0-40000000", use_rep="copy_number", show=False)

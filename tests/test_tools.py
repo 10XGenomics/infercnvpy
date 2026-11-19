@@ -10,7 +10,7 @@ import scipy.sparse as sp
 
 import infercnvpy as cnv
 from infercnvpy.tl._infercnv import _get_reference
-from tests.conftest import knn_graph, simulate_copy_number
+from tests.conftest import simulate_copy_number
 
 
 def test_get_reference_key_and_cat(adata_mock):
@@ -297,13 +297,10 @@ def test_tools_accept_a_dense_x_cnv(adata_oligodendroglioma):
     cnv.tl.umap(adata)
     cnv.tl.cnv_score(adata)
     cnv.tl.ithcna(adata, groupby="cell_type")
-    adata.obsm["spatial"] = np.random.default_rng(0).random((adata.n_obs, 2))
-    adata.obsp["spatial_connectivities"] = knn_graph(adata.obsm["spatial"])
-    cnv.tl.smooth_cnv(adata, **ref)
     for mode in ("fast", "legacy"):
         cnv.pl.chromosome_heatmap(adata, groupby="cell_type", mode=mode, show=False)
         cnv.pl.chromosome_heatmap_summary(adata, groupby="cell_type", mode=mode, show=False)
-    assert {"X_cnv_pca", "X_cnv_umap", "X_cnv_smoothed"} <= set(adata.obsm)
+    assert {"X_cnv_pca", "X_cnv_umap"} <= set(adata.obsm)
     assert {"cnv_leiden", "cnv_score", "ithcna"} <= set(adata.obs)
 
 
@@ -379,16 +376,13 @@ def test_copykat_stub(adata_mock):
     [
         lambda a: cnv.tl.copy_number(a, min_genes=5, n_restarts=1, n_jobs=1, inplace=False),
         lambda a: cnv.tl.detectability(a, inplace=False),
-        lambda a: cnv.tl.smooth_cnv(a, inplace=False),
     ],
-    ids=["copy_number", "detectability", "smooth_cnv"],
+    ids=["copy_number", "detectability"],
 )
 def test_float16_input(run):
     """A float16 X (as in `datasets.maynard2020_3k`), which scipy.sparse rejects, is read as float32."""
     adata = simulate_copy_number(n_tumour=60, n_normal=60, genes=100, depth=800)
     adata.X = adata.X.toarray().astype(np.float16)
-    adata.obsm["X_cnv"] = adata.X[:, :50]
-    adata.obsp["spatial_connectivities"] = knn_graph(np.random.default_rng(0).random((adata.n_obs, 2)))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         run(adata)

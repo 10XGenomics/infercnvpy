@@ -17,7 +17,7 @@ from ._copy_number import copy_number
 from ._detectability import detectability
 from ._infercnv import infercnv
 from ._scores import cnv_score, ithcna, ithgex
-from ._spatial import smooth_cnv, spatial_regions
+from ._spatial import spatial_regions
 
 __all__ = [
     "cnv_score",
@@ -29,7 +29,6 @@ __all__ = [
     "ithgex",
     "leiden",
     "pca",
-    "smooth_cnv",
     "spatial_regions",
     "tsne",
     "umap",

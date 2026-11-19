@@ -255,10 +255,9 @@ def copy_number(
         the copy number of a tumor cell next to it, and the other way round. Reference cells take the diploid clone
         as their neighbors' state, so their probability of being aneuploid can only go down. Without a reference, use
         the same split with your own annotation by setting the graph's entries between known normal cells and the
-        other cells to 0 (see :func:`~infercnvpy.tl.smooth_cnv`). `copy_number_llr` stays the cell's own log
-        likelihood ratio; `copy_number_score`, the labels, clones and profiles use the spatial posteriors. With
-        several `n_restarts`, the fit is chosen without the spatial prior, and the prior then applies to that fit
-        only. Default `None`: no spatial information.
+        other cells to 0. `copy_number_llr` stays the cell's own log likelihood ratio; `copy_number_score`, the
+        labels, clones and profiles use the spatial posteriors. With several `n_restarts`, the fit is chosen without
+        the spatial prior, and the prior then applies to that fit only. Default `None`: no spatial information.
     max_neighbor_weight
         Largest weight that a cell's neighbors get in its prior when `connectivity_key` is given; the weight itself is
         estimated from the data, up to this value. A lower value lets a cell's own data count more, which reduces the
@@ -268,8 +267,8 @@ def copy_number(
         Call cells even where the data hold too little copy number information. With fewer than 1,000 genes passing
         the filters (small imaging panels) or a median below 150 counts per cell in those genes, the calls are not
         reliable, so by default copy_number logs a warning and labels the cells `"undetermined"` without fitting the
-        model. For such data, use :func:`~infercnvpy.tl.infercnv` with reference cells, smoothed with
-        :func:`~infercnvpy.tl.smooth_cnv`.
+        model. For such data, use :func:`~infercnvpy.tl.infercnv` with reference cells, and read groups of cells
+        rather than single cells, e.g. regions from :func:`~infercnvpy.tl.spatial_regions` on per-cell calls.
     calculate_gene_values
         Also store the copy number log ratio of every gene (cells x genes) in
         `adata.layers["gene_values_{key_added}"]`, as :func:`~infercnvpy.tl.infercnv` does. Gene values come from the
@@ -423,7 +422,7 @@ def copy_number(
             log.warning(
                 "copy_number: %d genes pass the filters, with a median of %d counts per cell; reliable calls need at "
                 "least %d genes and %d counts per cell, so %d cells are labeled %r. For small panels, use "
-                "`tl.infercnv` with reference cells, smoothed with `tl.smooth_cnv`; `force_calls=True` calls the "
+                "`tl.infercnv` with reference cells and read groups of cells; `force_calls=True` calls the "
                 "cells anyway.",
                 lay.n_genes, depth, _MIN_PANEL_GENES, _MIN_MEDIAN_COUNTS, n, UNDETERMINED,
             )  # fmt: skip

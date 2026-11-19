@@ -67,8 +67,8 @@ def spatial_cnv(
         Columns of `adata.obs` to plot as additional panels, e.g. labels from
         :func:`infercnvpy.tl.spatial_regions`.
     use_rep
-        Key of the CNV matrix, `adata.obsm["X_{use_rep}"]`, e.g. `"cnv_smoothed"` from
-        :func:`infercnvpy.tl.smooth_cnv`.
+        Key of the CNV matrix, `adata.obsm["X_{use_rep}"]`, e.g. `"copy_number"` from
+        :func:`infercnvpy.tl.copy_number`.
     basis
         Key of the coordinates in `adata.obsm` (`"spatial"` refers to `obsm["spatial"]`).
     cmap

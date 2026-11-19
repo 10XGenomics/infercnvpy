@@ -43,7 +43,7 @@ _PAD_W = 0.03
 _PAD_H = 0.05
 _CBAR_MAX_H = 4.0
 
-#: Color bar label: infercnv, smooth_cnv and SCEVAN all report CNV relative to the reference cells.
+#: Color bar label: infercnv and SCEVAN both report CNV relative to the reference cells.
 CBAR_LABEL = "CNV (relative to reference)"
 
 
