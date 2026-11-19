@@ -1,4 +1,4 @@
-# infercnvpy: Scanpy plugin to infer copy number variation (CNV) from single-cell transcriptomics data
+# infercnvpy: Infer copy number variation (CNV) from single-cell transcriptomics data
 
 [![Tests][badge-tests]][link-tests]
 [![Documentation][badge-docs]][link-docs]
@@ -10,10 +10,11 @@
 [badge-pypi]: https://img.shields.io/pypi/v/infercnvpy?logo=PyPI
 [link-pypi]: https://pypi.org/project/infercnvpy/
 
-Infercnv is a scalable python library to infer copy number variation (CNV) events from single cell transcriptomics data. It is heavily inspired by [InferCNV][], but plays nicely with [scanpy][] and is much more scalable.
+Infercnv is a scalable Python library to infer copy number variation (CNV) events from single cell transcriptomics data.
+It is heavily inspired by [InferCNV][], but plays nicely with the [scverse ecoystem][] and is much more scalable.
 
 [infercnv]: https://github.com/broadinstitute/inferCNV/wiki
-[scanpy]: https://scanpy.readthedocs.io/en/stable/index.html
+[scverse ecosystem]: https://scverse.org/packages/#ecosystem
 
 ![The main result of infercnv](img/infercnv_heatmap.png)
 
