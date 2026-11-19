@@ -409,6 +409,50 @@ def test_bad_arguments(adata_small):
         cnv.pl.chromosome_heatmap(adata_small, groupby="group", aggregate="max")  # type: ignore[arg-type]
 
 
+# --- chromosomes ----------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fmt", [np.asarray, sp.csr_matrix, _dask])
+@pytest.mark.parametrize("mode", ["fast", "legacy"])
+@pytest.mark.parametrize("dendrogram", [False, True])
+@both_plots
+def test_chromosomes_plot_like_a_subset(adata_small, fmt, mode, dendrogram, plot):
+    """`chromosomes` draws what a hand-made AnnData of their windows draws, in the given order."""
+    if mode == "legacy" and (fmt is _dask or (dendrogram and fmt is sp.csr_matrix)):
+        pytest.skip("legacy needs the matrix in memory, and scanpy's dendrogram needs it dense")
+    adata_small = adata_small[adata_small.obs["group"].notna()].copy()  # legacy cannot draw cells without group
+    X = adata_small.obsm["X_cnv"].toarray()
+    adata_small.obsm["X_cnv"] = fmt(X)
+    subset = AnnData(
+        obs=adata_small.obs,
+        obsm={"X_cnv": np.hstack([X[:, 9:], X[:, :5]])},
+        uns={"cnv": {"chr_pos": {"chr3": 0, "chr1": 3}}, "group_colors": adata_small.uns["group_colors"]},
+    )
+    kwargs = {"groupby": "group", "mode": mode, "dendrogram": dendrogram, "show": False}
+    if dendrogram:
+        plot(adata_small, **kwargs)  # stores the dendrogram of all chromosomes, which the subset must not use
+    stored = adata_small.uns.get("dendrogram_group")
+    actual = plot(adata_small, chromosomes=["chr3", "chr1"], **kwargs)
+    expected = plot(subset, **kwargs)
+    np.testing.assert_allclose(_image(actual), _image(expected), rtol=1e-6)
+    assert [t.get_text() for t in actual["gene_groups_ax"].texts] == ["chr3", "chr1"]
+    assert [t.get_text() for t in actual["groupby_ax"].get_yticklabels()] == [
+        t.get_text() for t in expected["groupby_ax"].get_yticklabels()
+    ]
+    assert adata_small.uns.get("dendrogram_group") is stored  # the subset's dendrogram is not stored
+    assert isinstance(adata_small.obsm["X_cnv"], type(fmt(X)))
+
+
+def test_chromosomes_single_name_and_errors(adata_small):
+    axes = cnv.pl.chromosome_heatmap(adata_small, groupby="group", chromosomes="chr2", show=False)
+    assert _image(axes).shape[1] == 4
+    with pytest.raises(ValueError, match=r"\['chr9'\] not in .*\['chr1', 'chr2', 'chr3'\]"):
+        cnv.pl.chromosome_heatmap(adata_small, groupby="group", chromosomes=["chr1", "chr9"])
+    for bad in ([], ["chr1", "chr1"]):
+        with pytest.raises(ValueError, match="at least one chromosome, each once"):
+            cnv.pl.chromosome_heatmap_summary(adata_small, groupby="group", chromosomes=bad)
+
+
 # --- on infercnv results ------------------------------------------------------------------------------------------
 
 

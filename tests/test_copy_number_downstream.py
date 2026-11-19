@@ -24,6 +24,17 @@ def test_chromosome_heatmaps(adata_cn, mode):
     )
 
 
+@pytest.mark.parametrize("mode", ["fast", "legacy"])
+def test_chromosome_heatmaps_of_some_chromosomes(adata_cn, mode):
+    chr_pos = adata_cn.uns["copy_number"]["chr_pos"]
+    chromosomes = sorted(chr_pos, key=chr_pos.get)[:2][::-1]
+    for plot in (cnv.pl.chromosome_heatmap, cnv.pl.chromosome_heatmap_summary):
+        axes = plot(
+            adata_cn, groupby="copy_number_clone", use_rep="copy_number", chromosomes=chromosomes, mode=mode, show=False
+        )
+        assert [t.get_text() for t in axes["gene_groups_ax"].texts] == chromosomes
+
+
 def test_embedding_clustering_and_scores(adata_cn):
     a = adata_cn.copy()
     cnv.tl.pca(a, use_rep="copy_number", key_added="cn_pca")
