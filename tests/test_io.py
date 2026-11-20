@@ -1,4 +1,5 @@
 import logging
+import sys
 from functools import partial
 
 import anndata as ad
@@ -164,6 +165,13 @@ def test_genomic_position_from_biomart_replaces_existing_columns(monkeypatch, tm
     assert res["start"].tolist()[0] == 10
     assert res["other"].tolist() == [5, 6]
     assert not res.columns.str.endswith(("_x", "_y")).any()
+
+
+def test_genomic_position_from_biomart_names_the_extra(monkeypatch):
+    """Without pybiomart, the error names the `biomart` extra instead of scanpy's bare ModuleNotFoundError."""
+    monkeypatch.setitem(sys.modules, "pybiomart", None)  # makes `import pybiomart` raise ImportError
+    with pytest.raises(ImportError, match=r'pip install "infercnvpy\[biomart\]"'):
+        genomic_position_from_biomart()
 
 
 def test_genomic_position_from_biomart_duplicate_message(monkeypatch, caplog):

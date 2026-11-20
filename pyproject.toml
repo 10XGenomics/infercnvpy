@@ -33,7 +33,6 @@ dependencies = [
   "numpy>=2.2",
   "pandas>=2.3",
   "pooch>=1.8",
-  "pybiomart>=0.2",
   "pycairo>=1.20; sys_platform=='win32'",
   "scanpy>=1.11,<1.13",
   "scipy>=1.15",
@@ -43,6 +42,7 @@ dependencies = [
   "session-info2>=0.2",
   "tqdm>=4.66",                           # progress bar of tl.copy_number
 ]
+optional-dependencies.biomart = [ "pybiomart>=0.2" ]  # only on bioconda, so optional for conda-forge
 optional-dependencies.dask = [ "anndata[dask,lazy]" ]  # dask arrays, and anndata.experimental.read_lazy
 optional-dependencies.gtf = [ "gtfparse>=3" ]
 optional-dependencies.scevan = [ "rdata>=1" ]  # MIT; reads SCEVAN .RData files
@@ -103,9 +103,9 @@ envs.hatch-check-fmt.scripts.format-check = "echo 'try `hatch check fmt --fix`';
 envs.hatch-check-fmt.scripts.format-fix = "prek run -a --group=format --no-group=typecheck"
 envs.hatch-check-types.scripts.check = [ "mypy" ]
 envs.hatch-check-types.dependency-groups = [ "typecheck", "test" ]
-# The `gtf` and `scevan` extras let `tests/test_io.py` run `genomic_position_from_gtf` and `read_scevan`.
-# Both are imported lazily, so the base import works without them.
-envs.hatch-test.features = [ "gtf", "scevan" ]
+# The `biomart`, `gtf` and `scevan` extras let `tests/test_io.py` run the BioMart and GTF readers and `read_scevan`.
+# All three are imported lazily, so the base import works without them.
+envs.hatch-test.features = [ "biomart", "gtf", "scevan" ]
 envs.hatch-test.matrix = [
   # Test the lowest and highest supported Python versions with normal deps
   { deps = [ "stable" ], python = [ "3.13", "3.14" ] },
@@ -171,6 +171,7 @@ overrides = [
     "mpl_toolkits.*",
     "numba.*",
     "pooch.*",
+    "pybiomart.*",
     "rdata.*",
     "scanpy.*",
     "scipy.*"
