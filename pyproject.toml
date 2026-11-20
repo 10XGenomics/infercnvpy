@@ -47,7 +47,7 @@ optional-dependencies.dask = [ "anndata[dask,lazy]" ]  # dask arrays, and anndat
 optional-dependencies.gtf = [ "gtfparse>=3" ]
 optional-dependencies.scevan = [ "rdata>=1" ]  # MIT; reads SCEVAN .RData files
 optional-dependencies.spatial = [ "squidpy>=1.8.4" ]
-# https://docs.pypi.org/project_metadata/#project-urls
+# https://docs.pypi.org/project_metadata/#project-links
 urls.Changelog = "https://github.com/scverse/infercnvpy/releases"
 urls.Documentation = "https://infercnvpy.readthedocs.io/"
 urls.Forum = "https://discourse.scverse.org/"

@@ -6,7 +6,7 @@
 as a dense array. The expression matrix can be
 
 - an in-memory `numpy` array or `scipy` sparse matrix,
-- a [dask](https://www.dask.org/) array, also with sparse `scipy` blocks, e.g. a matrix loaded lazily with
+- a [dask](https://dask.org/) array, also with sparse `scipy` blocks, e.g. a matrix loaded lazily with
   {func}`anndata.experimental.read_elem_lazy` or {func}`anndata.experimental.read_lazy`, or a table from
   [spatialdata-io](https://spatialdata.scverse.org/projects/io/),
 - the matrix of a backed AnnData (`anndata.read_h5ad(..., backed="r")`), stored as CSR or dense. Reading a block

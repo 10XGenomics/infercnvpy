@@ -126,14 +126,14 @@ The `.venv` directory is typically automatically discovered by IDEs such as VS C
 ::::{tab-item} Pip
 :sync: pip
 
-Pip is nowadays mostly superseded by environment manager such as [hatch][].
-However, for the sake of completeness, and since it’s ubiquitously available,
+Pip is nowadays mostly superseded by environment managers such as [hatch][].
+However, for the sake of completeness, and since it's ubiquitously available,
 we describe how you can manage environments manually using `pip`:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev,test,doc]"
+pip install -e . --group dev --group test --group doc  # needs pip 25.1 or later
 ```
 
 The `.venv` directory is typically automatically discovered by IDEs such as VS Code.
@@ -141,7 +141,6 @@ The `.venv` directory is typically automatically discovered by IDEs such as VS C
 ::::
 :::::
 
-[hatch environments]: https://hatch.pypa.io/latest/tutorials/environment/basic-usage/
 [hatch-code]: https://marketplace.visualstudio.com/items?itemName=PyPA.hatch
 [uv]: https://docs.astral.sh/uv/
 
@@ -171,7 +170,7 @@ Consider enabling this option for [ruff][ruff-editors] and [biome][biome-editors
 
 [prek]: https://prek.j178.dev/
 [ruff-editors]: https://docs.astral.sh/ruff/integrations/
-[biome-editors]: https://biomejs.dev/guides/integrate-in-editor/
+[biome-editors]: https://biomejs.dev/configuration/editors/
 
 ### Logging and warnings
 
