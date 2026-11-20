@@ -341,11 +341,13 @@ def copy_number(
         Per clone: `n_cells`, `aneuploid`, `amplitude` (smooth amplitude of its profile) and `burden` (fraction of
         genes in long non-neutral segments).
     `adata.uns["copy_number"]["clone_profiles"]` : :class:`pandas.DataFrame`
-        Log ratio (natural log) of each clone in each bin.
+        Log ratio (natural log) of each clone in each bin, relative to the clone's most common level, which the model
+        takes as copy-neutral. The level is not necessarily two copies, and a change shared by most of the genome, such
+        as a whole-genome doubling, doesn't show.
     `adata.uns["copy_number"]["segments"]` : :class:`pandas.DataFrame`
-        Segments of the aneuploid clones: `clone`, `chromosome`, `start`, `end`, `n_genes`, `log_ratio` (natural log)
-        with a 95% interval (`ci_low`, `ci_high`), `state_ratio` (copy ratio of the HMM state) and `p_neutral` (mean
-        posterior probability of the neutral state).
+        Segments of the aneuploid clones: `clone`, `chromosome`, `start`, `end`, `n_genes`, `log_ratio` (natural log,
+        relative to the same level as `clone_profiles`) with a 95% interval (`ci_low`, `ci_high`), `state_ratio` (copy
+        ratio of the HMM state) and `p_neutral` (mean posterior probability of the neutral state).
     `adata.uns["copy_number"]["genes"]` : :class:`pandas.DataFrame`
         The genes used, in genomic order, with their `dosage` weight (1: expression follows copy number fully; the
         final likelihood uses these weights).
