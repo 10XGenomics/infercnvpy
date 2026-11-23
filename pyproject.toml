@@ -16,9 +16,10 @@ maintainers = [
 authors = [
   { name = "Gregor Sturm" },
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
   "Programming Language :: Python :: 3.15",
@@ -29,7 +30,7 @@ dependencies = [
   "anndata>=0.12",
   "leidenalg>=0.11",
   "matplotlib>=3.10",
-  "numba>=0.61.2",                        # first release with numpy 2.2 and python 3.13
+  "numba>=0.61.2",                        # first release with numpy 2.2 (supports python 3.10-3.13)
   "numpy>=2.2",
   "pandas>=2.3",
   "pooch>=1.8",
@@ -108,11 +109,11 @@ envs.hatch-check-types.dependency-groups = [ "typecheck", "test" ]
 envs.hatch-test.features = [ "biomart", "gtf", "scevan" ]
 envs.hatch-test.matrix = [
   # Test the lowest and highest supported Python versions with normal deps
-  { deps = [ "stable" ], python = [ "3.13", "3.14" ] },
+  { deps = [ "stable" ], python = [ "3.12", "3.14" ] },
   # Test the newest supported Python version also with pre-release deps
   { deps = [ "pre" ], python = [ "3.14" ] },
   # Test the lowest supported Python version with the minimum versions of direct deps (SPEC 0)
-  { deps = [ "min" ], python = [ "3.13" ] },
+  { deps = [ "min" ], python = [ "3.12" ] },
 ]
 # `pre` allows pre-releases, `min` resolves every direct dependency to its lower bound.
 envs.hatch-test.overrides.matrix.deps.env-vars = [

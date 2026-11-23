@@ -1,6 +1,6 @@
 # Installation
 
-infercnvpy needs Python 3.13 or newer.
+infercnvpy needs Python 3.12 or newer.
 We recommend [uv][], which installs Python for you and keeps each project's dependencies in their own virtual environment.
 
 ## PyPI
