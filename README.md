@@ -43,7 +43,7 @@ Please refer to the [documentation][link-docs]. In particular, the
 
 ## Installation
 
-You need Python 3.13 or newer. There are several options to install infercnvpy:
+You need Python 3.12 or newer. There are several options to install infercnvpy:
 
 1. Install the latest release of `infercnvpy` from [PyPI][link-pypi]:
 
